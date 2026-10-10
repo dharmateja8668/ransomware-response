@@ -1,14 +1,21 @@
-annotated-doc==0.0.5
+# Core FastAPI dependencies
 annotated-types==0.8.0
 anyio==4.15.1
 click==8.5.0
 fastapi==0.143.0
 h11==0.16.0
 idna==3.20
-opentelemetry-api==1.45.1
 pydantic==2.14.0
 pydantic_core==2.50.0
 starlette==1.7.0
 typing-inspection==0.4.4
 typing_extensions==4.16.0
 uvicorn==0.54.0
+
+# Day 3 -- EDR API Integration
+requests==2.34.2
+
+# Testing
+pytest==9.1.1
+pytest-mock==3.16.0
+httpx2==2.13.1

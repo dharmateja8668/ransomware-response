@@ -3,19 +3,41 @@
 FastAPI backend for the "Automated Ransomware Containment & Incident Response Orchestrator".
 
 Endpoints:
-  - GET  /health       : Health-check endpoint returning server operational status.
-  - POST /alert        : Day 2 alert-intake endpoint (preserved for backwards compatibility).
-  - POST /webhook/edr  : Day 4 secure webhook endpoint for receiving simulated EDR alerts.
-  - GET  /docs         : OpenAPI / Swagger interactive documentation.
+  - GET   /health                  : Health-check endpoint returning server operational status.
+  - POST  /alert                   : Day 2 alert-intake endpoint (preserved for backwards compatibility).
+  - POST  /webhook/edr             : Day 4 secure webhook endpoint for receiving simulated EDR alerts.
+  - POST  /incidents               : Week 5 Day 2 create a new incident record.
+  - GET   /incidents               : Week 5 Day 2 list all incidents with optional filtering.
+  - GET   /incidents/{alert_id}    : Week 5 Day 2 retrieve a single incident by alert_id.
+  - PATCH /incidents/{alert_id}/status : Week 5 Day 2 update the lifecycle status of an incident.
+  - GET   /docs                    : OpenAPI / Swagger interactive documentation.
 """
 
+from contextlib import asynccontextmanager
 import logging
 import os
 import secrets
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
+
+from incidents.database import init_db
+from incidents.models import (
+    IncidentCreate,
+    IncidentResponse,
+    IncidentStatus,
+    IncidentUpdateStatus,
+)
+from incidents.service import (
+    IncidentDuplicateError,
+    IncidentNotFoundError,
+    create_incident,
+    get_incident_by_alert_id,
+    list_incidents,
+    update_incident_status,
+)
+from integrations.alert_parser import AlertParsingError, parse_and_enrich_alert
 
 # Setup logging
 logger = logging.getLogger("orchestrator")
@@ -49,10 +71,18 @@ def _load_env_file(filepath: str = ".env") -> None:
 _load_env_file()
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan managing database initialization."""
+    init_db()
+    yield
+
+
 app = FastAPI(
     title="Automated Ransomware Containment & Incident Response Orchestrator",
-    description="Backend API and webhook intake for incident response orchestration.",
-    version="0.4.0",
+    description="Backend API, webhook intake, and incident management for incident response orchestration.",
+    version="0.5.0",
+    lifespan=lifespan,
 )
 
 
@@ -143,7 +173,8 @@ def receive_edr_webhook(
       1. Authenticates request via shared secret in headers (constant-time verification).
       2. Validates JSON payload against the Alert model (required & optional fields).
       3. Extracts essential fields and safely logs alert metadata (no secrets logged).
-      4. Returns JSON confirmation acknowledgement.
+      4. Stores the incoming alert as an incident record in SQLite (idempotent for retries).
+      5. Returns JSON confirmation acknowledgement.
 
     No destructive containment or automated endpoint actions are executed on Day 4.
     """
@@ -157,11 +188,122 @@ def receive_edr_webhook(
         alert.ip_address or "N/A",
     )
 
+    # Parse, normalize, and enrich the incoming alert payload safely
+    try:
+        parsed_alert = parse_and_enrich_alert(alert)
+    except AlertParsingError as parse_err:
+        logger.warning("Webhook alert parsing error for alert_id=%s: %s", alert.alert_id, parse_err)
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Malformed alert payload: {parse_err}",
+        )
+
+    # Check for existing incident (idempotency policy for webhooks)
+    try:
+        existing = get_incident_by_alert_id(parsed_alert.alert_id)
+        if existing:
+            logger.info("Webhook duplicate received for alert_id=%s. Idempotently acknowledging.", parsed_alert.alert_id)
+            return {
+                "status": "duplicate",
+                "alert_id": parsed_alert.alert_id,
+                "message": f"EDR webhook alert '{parsed_alert.alert_id}' has already been processed.",
+                "threat_type": parsed_alert.threat_type,
+                "severity": parsed_alert.severity,
+                "incident_status": existing.status.value,
+            }
+
+        incident_create = IncidentCreate(
+            alert_id=parsed_alert.alert_id,
+            threat_type=parsed_alert.threat_type,
+            severity=parsed_alert.severity,
+            description=parsed_alert.description,
+            timestamp=parsed_alert.timestamp,
+            hostname=parsed_alert.hostname,
+            ip_address=parsed_alert.ip_address,
+            username=parsed_alert.username,
+            process_hash=parsed_alert.process_hash,
+            status=IncidentStatus.NEW,
+        )
+        stored = create_incident(incident_create)
+    except IncidentDuplicateError:
+        logger.info("Webhook alert_id=%s already recorded.", parsed_alert.alert_id)
+        return {
+            "status": "duplicate",
+            "alert_id": parsed_alert.alert_id,
+            "message": f"EDR webhook alert '{parsed_alert.alert_id}' has already been processed.",
+            "threat_type": parsed_alert.threat_type,
+            "severity": parsed_alert.severity,
+        }
+    except Exception as exc:
+        logger.error("Failed to store incident for webhook %s: %s", parsed_alert.alert_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to store incident record securely.",
+        )
+
     return {
         "status": "received",
-        "alert_id": alert.alert_id,
-        "message": f"EDR webhook alert '{alert.alert_id}' of type '{alert.threat_type}' processed successfully.",
-        "threat_type": alert.threat_type,
-        "severity": alert.severity,
+        "alert_id": parsed_alert.alert_id,
+        "message": f"EDR webhook alert '{parsed_alert.alert_id}' of type '{parsed_alert.threat_type}' processed successfully.",
+        "threat_type": parsed_alert.threat_type,
+        "severity": parsed_alert.severity,
+        "incident_status": stored.status.value,
     }
 
+
+# ── Week 5 Day 2 Incident Endpoints ──────────────────────────────────────────
+
+
+@app.post("/incidents", response_model=IncidentResponse, status_code=status.HTTP_201_CREATED)
+def create_incident_endpoint(incident_in: IncidentCreate) -> IncidentResponse:
+    """Create a new security incident record."""
+    try:
+        return create_incident(incident_in)
+    except IncidentDuplicateError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        )
+    except Exception as exc:
+        logger.error("Error creating incident %s: %s", incident_in.alert_id, exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while creating the incident record.",
+        )
+
+
+@app.get("/incidents", response_model=List[IncidentResponse], status_code=status.HTTP_200_OK)
+def list_incidents_endpoint(
+    status: Optional[str] = None,
+    severity: Optional[int] = None,
+    limit: int = 100,
+) -> List[IncidentResponse]:
+    """Retrieve all incidents with optional filtering by status and severity."""
+    return list_incidents(status=status, severity=severity, limit=limit)
+
+
+@app.get("/incidents/{alert_id}", response_model=IncidentResponse, status_code=status.HTTP_200_OK)
+def get_incident_endpoint(alert_id: str) -> IncidentResponse:
+    """Retrieve details for a specific incident by alert_id."""
+    incident = get_incident_by_alert_id(alert_id)
+    if not incident:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Incident with alert_id '{alert_id}' was not found.",
+        )
+    return incident
+
+
+@app.patch("/incidents/{alert_id}/status", response_model=IncidentResponse, status_code=status.HTTP_200_OK)
+def update_incident_status_endpoint(
+    alert_id: str,
+    update_data: IncidentUpdateStatus,
+) -> IncidentResponse:
+    """Update the lifecycle status of an existing incident."""
+    try:
+        return update_incident_status(alert_id, update_data.status)
+    except IncidentNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Incident with alert_id '{alert_id}' was not found.",
+        )

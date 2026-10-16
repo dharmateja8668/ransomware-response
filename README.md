@@ -11,15 +11,16 @@ An automated incident response orchestration platform designed to intake endpoin
 4. [Webhook Security & Authentication](#webhook-security--authentication)
 5. [Alert Parsing and Telemetry Enrichment (Day 5)](#alert-parsing-and-telemetry-enrichment-day-5)
 6. [Incident Data Management & Storage (SQLite)](#incident-data-management--storage-sqlite)
-7. [API Endpoints](#api-endpoints)
-8. [Working with Incidents](#working-with-incidents)
-9. [Sending Test Alerts](#sending-test-alerts)
-10. [Duplicate Alert Handling (Idempotency)](#duplicate-alert-handling-idempotency)
-11. [Configuration & Environment Setup](#configuration--environment-setup)
-12. [Running the Application](#running-the-application)
-13. [Running the Test Suite](#running-the-test-suite)
-14. [Current Limitations](#current-limitations)
-15. [Security Best Practices](#security-best-practices)
+7. [Network Containment Decision Logic (Week 2 Day 1)](#network-containment-decision-logic-week-2-day-1)
+8. [API Endpoints](#api-endpoints)
+9. [Working with Incidents](#working-with-incidents)
+10. [Sending Test Alerts](#sending-test-alerts)
+11. [Duplicate Alert Handling (Idempotency)](#duplicate-alert-handling-idempotency)
+12. [Configuration & Environment Setup](#configuration--environment-setup)
+13. [Running the Application](#running-the-application)
+14. [Running the Test Suite](#running-the-test-suite)
+15. [Current Limitations](#current-limitations)
+16. [Security Best Practices](#security-best-practices)
 
 ---
 
@@ -96,6 +97,103 @@ The `integrations/alert_parser.py` module ensures all incoming alerts conform to
   - `created_at` (TEXT, NOT NULL): UTC creation timestamp.
   - `updated_at` (TEXT, NOT NULL): UTC update timestamp.
 - **Indexes**: Indexed on `status` and `severity`.
+
+---
+
+## Network Containment Decision Logic (Week 2 Day 1)
+
+### What Network Containment Logic Does
+The Network Containment Decision module (`containment/network_containment.py`) evaluates incoming security alerts to determine whether automated network isolation should be recommended for an affected endpoint. It acts as an automated triage gatekeeper: identifying the compromised machine, verifying alert integrity, evaluating policy conditions, and generating a structured decision record before any operational containment action is executed.
+
+### How a Security Alert is Processed
+1. **Intake & Object Handling**: Accepts Python dictionaries, structured objects, or Pydantic models (such as `Alert`, `ParsedAlert`).
+2. **Schema & Field Validation (`validate_alert`)**:
+   - Ensures payload is a non-empty mapping or object.
+   - Validates that `alert_id` is present and non-empty.
+   - Normalizes and checks severity using recognized numeric scales (1–5) and textual levels (`critical`, `high`, `medium`, `low`, `informational`).
+   - Verifies affected endpoint identification: requires at least one of `hostname` or `endpoint_id`. If neither is provided, containment is rejected safely to prevent accidental or unidentifiable machine isolation.
+   - Validates that `alert_type` (or `threat_type`) is present and non-empty.
+   - Converts valid timestamps to standard ISO 8601 UTC format.
+3. **Policy Evaluation (`evaluate_policy`)**:
+   - Assesses the alert against the active `ContainmentPolicy` configuration.
+4. **Structured Decision Generation (`build_containment_decision`)**:
+   - Produces a consistent, structured dictionary with `alert_id`, `endpoint_id`, `hostname`, `containment_recommended`, `decision`, `reason`, and `timestamp`.
+5. **Safe Logging**:
+   - Logs receipt of alert, validation outcome, and decision generation without logging sensitive authentication credentials, tokens, or secrets.
+
+### How Containment Conditions are Evaluated
+The policy logic (`ContainmentPolicy`) uses configurable criteria rather than hardcoded thresholds:
+- **Critical Ransomware**: Recommended for containment by default (`contain_critical_ransomware=True`).
+- **Critical Hands-on-Keyboard**: Recommended for containment by default (`contain_critical_hands_on_keyboard=True`).
+- **High-Severity Suspicious Activity**: Recommended for containment only when explicitly enabled in policy (`contain_high_suspicious_activity=True`; default is `False`).
+- **Medium or Low Severity**: Does not trigger automatic containment under default policy (`contain_medium_low=False`).
+- **Invalid or Incomplete Alerts**: Safely rejected (`CONTAINMENT_REJECTED`) without recommending containment.
+
+### Day 1 vs. Day 2 Implementation Scope
+- **Implemented on Day 1**:
+  - Alert validation and machine identification logic.
+  - Configurable containment policy rules and thresholds.
+  - Structured decision generation (`CONTAINMENT_RECOMMENDED`, `CONTAINMENT_NOT_RECOMMENDED`, `CONTAINMENT_REJECTED`).
+  - Dry-run safety mode enabled by default (`dry_run=True`).
+  - Safe audit logging via Python's standard `logging` library.
+  - Complete unit test suite (34 unit tests).
+- **Scheduled for Day 2**:
+  - Live EDR API containment integration (initiating network isolation requests via CrowdStrike Falcon / Microsoft Defender APIs).
+  - Operating system network isolation command execution.
+  - Automated post-containment incident status progression (`CONTAINED`).
+
+### Example Input Alert
+
+```json
+{
+  "alert_id": "ALERT-1001",
+  "severity": "critical",
+  "alert_type": "ransomware",
+  "hostname": "LAB-WINDOWS-01",
+  "endpoint_id": "ENDPOINT-001",
+  "ip_address": "192.168.56.101",
+  "username": "lab_user",
+  "timestamp": "2026-10-16T10:30:00Z"
+}
+```
+
+### Example Output Containment Decision
+
+```json
+{
+  "alert_id": "ALERT-1001",
+  "endpoint_id": "ENDPOINT-001",
+  "hostname": "LAB-WINDOWS-01",
+  "containment_recommended": true,
+  "decision": "CONTAINMENT_RECOMMENDED",
+  "reason": "Critical ransomware alert meets the configured containment policy.",
+  "timestamp": "2026-10-16T10:30:00Z"
+}
+```
+
+### How to Run the Module
+
+Execute the module directly to run the built-in demonstration with sample alerts in dry-run mode:
+
+```powershell
+# Windows PowerShell
+.\venv\Scripts\python -m containment.network_containment
+
+# Or run directly
+.\venv\Scripts\python containment\network_containment.py
+```
+
+### How to Execute Unit Tests
+
+Run the dedicated containment unit test suite:
+
+```powershell
+# Run Day 1 Network Containment tests
+.\venv\Scripts\pytest.exe tests/test_network_containment.py -v
+
+# Run the full project test suite (114 tests)
+.\venv\Scripts\pytest.exe -v
+```
 
 ---
 
@@ -231,7 +329,9 @@ Execute the automated test suite using `pytest`:
 .\venv\Scripts\pytest.exe -v
 ```
 
-### Complete Test Coverage (80 Automated Tests):
+### Complete Test Coverage (114 Automated Tests):
+- **Network Containment Decision Logic Tests (`tests/test_network_containment.py`) — 34 Tests**:
+  - Critical ransomware and hands-on-keyboard containment recommendations, disabled/enabled high-severity policies, medium/low thresholds, missing IDs/telemetry validation, invalid severity, empty payloads, malformed inputs, object/Pydantic support, dry-run safety, and safe audit logging.
 - **Alert Parser Tests (`tests/test_alert_parser.py`) — 39 Tests**:
   - Severity normalization, timestamp UTC standardizing, missing/blank field validation, telemetry sanitization, and ransomware tagging.
 - **End-to-End Workflow Tests (`tests/test_e2e_workflow.py`) — 2 Tests**:

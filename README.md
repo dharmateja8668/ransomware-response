@@ -12,15 +12,16 @@ An automated incident response orchestration platform designed to intake endpoin
 5. [Alert Parsing and Telemetry Enrichment (Day 5)](#alert-parsing-and-telemetry-enrichment-day-5)
 6. [Incident Data Management & Storage (SQLite)](#incident-data-management--storage-sqlite)
 7. [Network Containment Decision Logic (Week 2 Day 1)](#network-containment-decision-logic-week-2-day-1)
-8. [API Endpoints](#api-endpoints)
-9. [Working with Incidents](#working-with-incidents)
-10. [Sending Test Alerts](#sending-test-alerts)
-11. [Duplicate Alert Handling (Idempotency)](#duplicate-alert-handling-idempotency)
-12. [Configuration & Environment Setup](#configuration--environment-setup)
-13. [Running the Application](#running-the-application)
-14. [Running the Test Suite](#running-the-test-suite)
-15. [Current Limitations](#current-limitations)
-16. [Security Best Practices](#security-best-practices)
+8. [Week 2 Day 2 — EDR Integration and Network Isolation](#week-2-day-2--edr-integration-and-network-isolation)
+9. [API Endpoints](#api-endpoints)
+10. [Working with Incidents](#working-with-incidents)
+11. [Sending Test Alerts](#sending-test-alerts)
+12. [Duplicate Alert Handling (Idempotency)](#duplicate-alert-handling-idempotency)
+13. [Configuration & Environment Setup](#configuration--environment-setup)
+14. [Running the Application](#running-the-application)
+15. [Running the Test Suite](#running-the-test-suite)
+16. [Current Limitations](#current-limitations)
+17. [Security Best Practices](#security-best-practices)
 
 ---
 
@@ -191,7 +192,114 @@ Run the dedicated containment unit test suite:
 # Run Day 1 Network Containment tests
 .\venv\Scripts\pytest.exe tests/test_network_containment.py -v
 
-# Run the full project test suite (114 tests)
+# Run the full project test suite
+.\venv\Scripts\pytest.exe -v
+```
+
+---
+
+## Week 2 Day 2 — EDR Integration and Network Isolation
+
+### Architecture & Overview
+Week 2 Day 2 connects the Day 1 containment decision logic with actionable, automated network containment via Endpoint Detection and Response (EDR) APIs.
+
+The containment orchestration pipeline operates in three integrated stages:
+1. **Decision Gatekeeper (Day 1)**: Evaluates incoming alerts against `ContainmentPolicy` rules, validating alert schema and endpoint indicators before approving containment.
+2. **Containment Orchestrator (Day 2)**: Coordinates the isolation workflow, enforces safety execution modes (Dry-Run vs. Authorized Live), checks duplicate suppression cooldowns, dispatches API requests to the EDR platform, and transitions incident lifecycle states.
+3. **EDR Client Integration Layer**: Interacts with production EDR platforms or simulated test adapters:
+   - **CrowdStrike Falcon (`CrowdStrikeClient`)**: Calls `POST /devices/entities/devices-actions/v2?action_name=contain` using OAuth 2.0 client credentials.
+   - **Microsoft Defender for Endpoint (`DefenderClient`)**: Calls `POST /api/machines/{id}/isolate` with `IsolationType: "Full"` using Azure AD OAuth 2.0.
+   - **Simulated EDR Client (`SimulatedEDRClient`)**: Provides realistic mock isolation responses without making external network calls.
+
+### Relationship Between Day 1 and Day 2
+- **Day 1**: Pure decision evaluation. Given an alert, it verifies structure, assesses severity and alert types, and generates a `ContainmentDecision` (`CONTAINMENT_RECOMMENDED`, `CONTAINMENT_NOT_RECOMMENDED`, or `CONTAINMENT_REJECTED`). It does not invoke network APIs or OS commands.
+- **Day 2**: Operational execution. Reuses Day 1 logic as a mandatory prerequisite gate. If Day 1 recommends containment and the alert includes a valid `endpoint_id`, Day 2 prepares an authorized EDR isolation request, submits it through the configured client, parses the response, and records the result. If Day 1 rejects or does not recommend containment, Day 2 halts immediately without contacting the EDR API.
+
+### Selected EDR Providers & Mock Implementation
+- **Supported Live Providers**: CrowdStrike Falcon and Microsoft Defender for Endpoint.
+- **Testing & Development**: The project provides concrete REST API client classes for both CrowdStrike Falcon and Microsoft Defender for Endpoint, paired with a safe, built-in mock adapter (`SimulatedEDRClient`). In automated test suites and local development, the mock adapter and `unittest.mock` are used exclusively. No real endpoints are ever isolated during tests.
+- **Implementation State**: Both providers are implemented cleanly without external SDK bloat, using Python's standard `requests` library.
+
+### Preserving Administrative Management Access
+Both supported EDR providers natively maintain management connectivity during network isolation:
+- **CrowdStrike Falcon**: Device containment cuts general IP communication while keeping the Falcon sensor's TLS management channel open to the Falcon cloud console.
+- **Microsoft Defender for Endpoint**: Machine isolation (`IsolationType: "Full"`) severs network connections while preserving connectivity to Defender cloud services and Intune.
+- *Notice*: Verification of actual host isolation and management connectivity retention must be conducted in an authorized sandbox or lab network before deployment in production.
+
+### Safe Execution Modes
+
+#### Mode A: Dry-Run (Default)
+- **Status**: Enabled by default (`dry_run=True`).
+- **Behavior**: Evaluates Day 1 policy, identifies target machine, and returns a simulated result (`status: "SIMULATED"`).
+- **Network Actions**: Zero outbound EDR network calls are dispatched.
+- **Guarantee**: Never claims that a real machine was isolated (`isolation_requested: false`).
+
+#### Mode B: Authorized EDR Execution
+- **Status**: Disabled by default.
+- **Activation**: Requires setting `EDR_EXECUTION_MODE=live` and `EDR_DRY_RUN=false` in `.env`, or passing `dry_run=False` in code.
+- **Prerequisites**: Valid EDR credentials, positive Day 1 recommendation, non-empty `endpoint_id`, and clearance from the duplicate request suppression registry.
+- **Result Handling**: Dispatches live isolation API call and maps response to `CONFIRMED`, `REQUESTED`, `FAILED`, or `UNKNOWN`. Never falls back silently to simulated success on failure.
+
+### Required Environment Variables
+
+Configure these settings in `.env` (template available in `.env.example`):
+
+| Variable | Description | Example / Allowed Values | Default |
+|---|---|---|---|
+| `EDR_PROVIDER` | Active EDR platform | `crowdstrike` or `defender` | (Required in live mode) |
+| `EDR_API_BASE_URL` | Base URL of EDR REST API | `https://api.crowdstrike.com` | (Required in live mode) |
+| `EDR_CLIENT_ID` | OAuth 2.0 client/application ID | `your-client-id` | (Required in live mode) |
+| `EDR_CLIENT_SECRET` | OAuth 2.0 client secret | `your-client-secret` | (Required in live mode) |
+| `EDR_TENANT_ID` | Azure AD tenant ID (Defender only) | `your-tenant-uuid` | None |
+| `EDR_TIMEOUT_SECONDS` | HTTP request timeout in seconds | `10` | `10` |
+| `EDR_EXECUTION_MODE` | Operational safety mode | `dry_run` or `live` | `dry_run` |
+| `EDR_DRY_RUN` | Secondary dry-run boolean toggle | `true` or `false` | `true` |
+
+> [!CAUTION]
+> Never commit real EDR client secrets, tokens, or tenant IDs to version control. Keep credentials in `.env`, which is strictly excluded by `.gitignore`.
+
+### Response Status Lifecycle
+
+The orchestrator returns structured results matching the following states:
+
+| Status | Meaning | Isolation Requested |
+|---|---|---|
+| `SIMULATED` | Dry-run mode completed safely. No outbound EDR request was sent. | `false` |
+| `CONFIRMED` | EDR provider confirmed that network isolation succeeded on the endpoint. | `true` |
+| `REQUESTED` | EDR provider accepted the isolation request; action is queued or in-progress. | `true` |
+| `FAILED` | Isolation request failed (auth failure, permission denied, timeout, or API error). | `true` / `false` |
+| `UNKNOWN` | Provider returned an ambiguous, unrecognized, or partial response payload. | `true` |
+| `NOT_RECOMMENDED` | Alert policy evaluation did not recommend containment (e.g. low severity). | `false` |
+| `REJECTED` | Alert payload validation failed or missing required `endpoint_id`. | `false` |
+
+### Failure Handling & Safeguards
+1. **No False Success**: If an EDR API call times out or returns HTTP 4xx/5xx, status is marked `FAILED` with diagnostic reason. It never falls back to `SIMULATED` or `CONFIRMED`.
+2. **Duplicate Suppression**: The `ContainmentRegistry` caches recently isolated endpoints within a configurable cooldown window (default: 300 seconds). Redundant requests return `CONFIRMED` with `isolation_requested=false`, preventing API spamming or race conditions.
+3. **Zero Secrets in Logs**: All HTTP headers, Bearer tokens, and secrets are strictly excluded from logging.
+4. **Idempotent Incident Progression**: When an isolation is `CONFIRMED`, any corresponding SQLite incident record is automatically transitioned to `CONTAINED`.
+
+### Limitations of Mock Implementation & Sandbox Requirements
+- **Mock Adapter Limitations**: `SimulatedEDRClient` generates representative payloads simulating CrowdStrike and Defender responses. It does not emulate real sensor heartbeats, kernel agent communication delays, or live network packet dropping.
+- **Sandbox Testing Requirements**:
+  1. A dedicated, non-production test tenant in CrowdStrike Falcon or Microsoft Defender for Endpoint.
+  2. Dedicated virtual machines (canary endpoints) with network isolation permissions.
+  3. Pre-configured API client credentials scoped strictly to device action containment (`devices:write` in CrowdStrike, `Machine.Isolate` in Microsoft Graph/Defender).
+  4. Out-of-band management connectivity (such as hypervisor console or cloud VM serial console) to access endpoints if isolation prevents standard administrative SSH/RDP.
+
+### Running the Integration in Dry-Run Mode
+
+```powershell
+# Run the built-in CLI demonstration in dry-run mode
+.\venv\Scripts\python containment\network_containment.py
+```
+
+### Running the Automated Tests
+
+```powershell
+# Run all Week 2 Day 2 EDR Containment tests (36 tests)
+.\venv\Scripts\pytest.exe tests/test_network_containment_edr.py -v
+
+# Run the complete project test suite (150 tests)
 .\venv\Scripts\pytest.exe -v
 ```
 
@@ -204,6 +312,7 @@ Run the dedicated containment unit test suite:
 | `GET` | `/health` | Health-check endpoint verifying operational status | No |
 | `POST` | `/alert` | Baseline alert intake (backwards compatible) | No |
 | `POST` | `/webhook/edr` | Secure webhook endpoint for incoming EDR alerts | **Yes (`X-Webhook-Secret`)** |
+| `POST` | `/containment/isolate` | Week 2 Day 2: Network Containment & EDR Isolation | No (dry-run by default) |
 | `POST` | `/incidents` | Manually record an incident (`409 Conflict` on duplicate ID) | No |
 | `GET` | `/incidents` | List all incidents (with optional `status` & `severity` filters) | No |
 | `GET` | `/incidents/{alert_id}` | Retrieve single incident details (`404 Not Found` if missing) | No |

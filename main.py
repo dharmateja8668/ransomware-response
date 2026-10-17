@@ -37,6 +37,7 @@ from incidents.service import (
     list_incidents,
     update_incident_status,
 )
+from containment.network_containment import execute_network_containment
 from integrations.alert_parser import AlertParsingError, parse_and_enrich_alert
 
 # Setup logging
@@ -307,3 +308,20 @@ def update_incident_status_endpoint(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Incident with alert_id '{alert_id}' was not found.",
         )
+
+
+# ── Week 2 Day 2 Network Containment Endpoint ─────────────────────────────────
+
+
+@app.post("/containment/isolate", status_code=status.HTTP_200_OK)
+def trigger_network_containment_endpoint(
+    alert: Alert,
+    dry_run: Optional[bool] = None,
+) -> dict:
+    """
+    Week 2 Day 2: Network Containment & EDR Isolation Endpoint.
+    Evaluates incoming alert telemetry against containment policy and requests
+    network isolation through the authorized EDR integration when recommended.
+    Defaults to safe dry-run simulation mode.
+    """
+    return execute_network_containment(alert, dry_run=dry_run)

@@ -27,8 +27,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
 import logging
+import os
 from pathlib import Path
 import sys
+import threading
 from typing import Any, Dict, Optional, Set, Tuple, Union
 
 # Ensure project root is accessible when executing script directly
@@ -41,6 +43,14 @@ from integrations.alert_parser import (
     AlertParsingError,
     normalize_severity,
     normalize_timestamp,
+)
+from integrations.edr_client import (
+    EDRAPIError,
+    EDRAuthError,
+    EDRConfigError,
+    EDRConnectionError,
+    EDRTimeoutError,
+    create_edr_client,
 )
 
 # Standard logging configuration (safe logging without secrets)
@@ -56,10 +66,23 @@ class ContainmentValidationError(ValueError):
     """Raised when an alert payload is invalid, incomplete, or malformed for containment evaluation."""
 
 
-# Decision outcome constants
+# Decision outcome constants (Day 1)
 DECISION_CONTAINMENT_RECOMMENDED = "CONTAINMENT_RECOMMENDED"
 DECISION_CONTAINMENT_NOT_RECOMMENDED = "CONTAINMENT_NOT_RECOMMENDED"
 DECISION_CONTAINMENT_REJECTED = "CONTAINMENT_REJECTED"
+
+# Execution mode constants (Day 2)
+EXECUTION_MODE_DRY_RUN = "dry_run"
+EXECUTION_MODE_LIVE = "live"
+
+# Isolation result status constants (Day 2)
+STATUS_SIMULATED = "SIMULATED"
+STATUS_REQUESTED = "REQUESTED"
+STATUS_CONFIRMED = "CONFIRMED"
+STATUS_FAILED = "FAILED"
+STATUS_UNKNOWN = "UNKNOWN"
+STATUS_NOT_RECOMMENDED = "NOT_RECOMMENDED"
+STATUS_REJECTED = "REJECTED"
 
 
 @dataclass
@@ -133,6 +156,59 @@ class ContainmentDecision:
             "reason": self.reason,
             "timestamp": self.timestamp,
         }
+
+
+@dataclass
+class ContainmentExecutionResult:
+    """
+    Represents the end-to-end outcome of an EDR network containment workflow.
+
+    Attributes:
+        alert_id: Identifier of the evaluated security alert.
+        endpoint_id: Identifier of the target machine/host (or None if missing/rejected).
+        hostname: Hostname of the target machine (if known).
+        containment_recommended: Whether policy recommended containment.
+        execution_mode: Execution mode ('dry_run' or 'live').
+        isolation_requested: Whether an isolation API request was dispatched to EDR.
+        status: Operation status ('SIMULATED', 'REQUESTED', 'CONFIRMED', 'FAILED', 'UNKNOWN', 'NOT_RECOMMENDED', 'REJECTED').
+        message: Human-readable explanation of the action or failure rationale.
+        edr_provider: EDR platform targeted ('crowdstrike', 'defender', 'simulated', or None).
+        action_id: Identifier or correlation ID returned by the EDR API (if available).
+        timestamp: ISO 8601 UTC timestamp of execution.
+        details: Optional sanitized diagnostic telemetry (without secrets).
+    """
+
+    alert_id: str
+    endpoint_id: Optional[str]
+    hostname: Optional[str]
+    containment_recommended: bool
+    execution_mode: str
+    isolation_requested: bool
+    status: str
+    message: str
+    edr_provider: Optional[str] = None
+    action_id: Optional[str] = None
+    timestamp: Optional[str] = None
+    details: Optional[Dict[str, Any]] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serializes the result to a standard dictionary compatible with application schemas."""
+        res: Dict[str, Any] = {
+            "alert_id": self.alert_id,
+            "endpoint_id": self.endpoint_id,
+            "hostname": self.hostname,
+            "containment_recommended": self.containment_recommended,
+            "execution_mode": self.execution_mode,
+            "isolation_requested": self.isolation_requested,
+            "status": self.status,
+            "message": self.message,
+            "edr_provider": self.edr_provider,
+            "action_id": self.action_id,
+            "timestamp": self.timestamp or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        if self.details is not None:
+            res["details"] = self.details
+        return res
 
 
 def _clean_string(val: Optional[Any]) -> Optional[str]:
@@ -539,13 +615,584 @@ def evaluate_containment(
     return decision_dict
 
 
-def main() -> None:
-    """Command-line demonstration of Day 1 Network Containment Decision Logic."""
-    print("=" * 70)
-    print("Automated Ransomware Containment -- Day 1 Containment Decision Logic")
-    print("=" * 70)
+class ContainmentRegistry:
+    """
+    Thread-safe registry tracking containment actions to prevent redundant or duplicate
+    isolation requests from being sent to the EDR platform.
+    """
 
-    # Sample Alert from Day 1 specification
+    def __init__(self, cooldown_seconds: int = 300) -> None:
+        self.cooldown_seconds = cooldown_seconds
+        self._records: Dict[str, Dict[str, Any]] = {}
+        self._lock = threading.Lock()
+
+    def is_contained(self, endpoint_id: str) -> bool:
+        """Checks whether the endpoint has an active or recent containment record within cooldown."""
+        with self._lock:
+            rec = self._records.get(endpoint_id)
+            if not rec:
+                return False
+            rec_time = rec.get("time")
+            if not rec_time:
+                return False
+            elapsed = (datetime.now(timezone.utc) - rec_time).total_seconds()
+            if elapsed < self.cooldown_seconds and rec.get("status") in (STATUS_CONFIRMED, STATUS_REQUESTED):
+                return True
+            return False
+
+    def get_record(self, endpoint_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieves the latest containment record for an endpoint."""
+        with self._lock:
+            return dict(self._records[endpoint_id]) if endpoint_id in self._records else None
+
+    def record(
+        self,
+        endpoint_id: str,
+        alert_id: str,
+        provider: str,
+        status: str,
+        action_id: Optional[str] = None,
+    ) -> None:
+        """Stores a containment action record."""
+        with self._lock:
+            self._records[endpoint_id] = {
+                "alert_id": alert_id,
+                "provider": provider,
+                "status": status,
+                "action_id": action_id,
+                "time": datetime.now(timezone.utc),
+            }
+
+    def clear(self) -> None:
+        """Clears all stored containment records."""
+        with self._lock:
+            self._records.clear()
+
+
+_GLOBAL_CONTAINMENT_REGISTRY = ContainmentRegistry()
+
+
+def get_containment_registry() -> ContainmentRegistry:
+    """Returns the singleton global containment registry."""
+    return _GLOBAL_CONTAINMENT_REGISTRY
+
+
+def clear_containment_registry() -> None:
+    """Clears the global containment registry (useful between test runs)."""
+    _GLOBAL_CONTAINMENT_REGISTRY.clear()
+
+
+def parse_edr_isolation_response(
+    provider: str,
+    response_data: Any,
+) -> Tuple[str, Optional[str], str]:
+    """
+    Parses the response payload from an EDR isolation API request and determines
+    whether the containment is CONFIRMED, REQUESTED, FAILED, or UNKNOWN.
+
+    Never assumes success simply because an HTTP response was returned.
+
+    Parameters:
+        provider: Provider identifier ('crowdstrike', 'defender', 'simulated').
+        response_data: Raw JSON dictionary returned by the EDR API.
+
+    Returns:
+        Tuple[str, Optional[str], str]: (status, action_id, message)
+    """
+    if not isinstance(response_data, dict):
+        return (
+            STATUS_UNKNOWN,
+            None,
+            "EDR response was not a dictionary or was malformed.",
+        )
+
+    norm_provider = str(provider).strip().lower()
+
+    # 1. CrowdStrike Falcon response parsing
+    if norm_provider == "crowdstrike":
+        errors = response_data.get("errors")
+        if isinstance(errors, list) and len(errors) > 0:
+            err_msgs = [
+                e.get("message", str(e)) if isinstance(e, dict) else str(e)
+                for e in errors
+            ]
+            return (
+                STATUS_FAILED,
+                None,
+                f"CrowdStrike reported errors: {'; '.join(err_msgs)}",
+            )
+
+        resources = response_data.get("resources")
+        if not isinstance(resources, list) or len(resources) == 0:
+            return (
+                STATUS_UNKNOWN,
+                None,
+                "CrowdStrike response contained no resource items.",
+            )
+
+        item = resources[0]
+        if not isinstance(item, dict):
+            return (
+                STATUS_UNKNOWN,
+                None,
+                "CrowdStrike resource item is malformed.",
+            )
+
+        action_id = str(item.get("id") or response_data.get("meta", {}).get("trace_id") or "")
+        complete = item.get("complete")
+        raw_status = str(item.get("status", "")).strip().lower()
+
+        if complete is True or raw_status in ("normal", "success", "completed", "contained", "true"):
+            return (
+                STATUS_CONFIRMED,
+                action_id or None,
+                "CrowdStrike Falcon network containment confirmed successfully.",
+            )
+        elif complete is False or raw_status in ("in_progress", "pending", "queued"):
+            return (
+                STATUS_REQUESTED,
+                action_id or None,
+                "CrowdStrike Falcon network containment requested and pending.",
+            )
+        elif raw_status in ("failed", "error"):
+            return (
+                STATUS_FAILED,
+                action_id or None,
+                f"CrowdStrike Falcon containment reported failure: {raw_status}",
+            )
+        else:
+            return (
+                STATUS_UNKNOWN,
+                action_id or None,
+                f"Ambiguous CrowdStrike status: '{raw_status}'. Preserving diagnostic data.",
+            )
+
+    # 2. Microsoft Defender for Endpoint response parsing
+    elif norm_provider == "defender":
+        action_id = str(response_data.get("id") or response_data.get("actionId") or "")
+        mde_status = str(response_data.get("status") or response_data.get("actionStatus") or "").strip().lower()
+
+        if not mde_status:
+            return (
+                STATUS_UNKNOWN,
+                action_id or None,
+                "Microsoft Defender response did not include a status field.",
+            )
+
+        if mde_status in ("succeeded", "completed", "success"):
+            return (
+                STATUS_CONFIRMED,
+                action_id or None,
+                "Microsoft Defender machine isolation confirmed successfully.",
+            )
+        elif mde_status in ("inprogress", "in_progress", "pending", "queued", "requested"):
+            return (
+                STATUS_REQUESTED,
+                action_id or None,
+                "Microsoft Defender machine isolation requested and pending.",
+            )
+        elif mde_status in ("failed", "cancelled", "error"):
+            return (
+                STATUS_FAILED,
+                action_id or None,
+                f"Microsoft Defender machine isolation failed: {mde_status}",
+            )
+        else:
+            return (
+                STATUS_UNKNOWN,
+                action_id or None,
+                f"Ambiguous Defender machine action status: '{mde_status}'. Preserving diagnostic data.",
+            )
+
+    # 3. Simulated Provider
+    elif norm_provider == "simulated":
+        action_id = str(response_data.get("action_id") or "sim-action")
+        return (
+            STATUS_CONFIRMED,
+            action_id,
+            "Simulated network isolation confirmed.",
+        )
+
+    # 4. Fallback / generic provider
+    else:
+        status_field = str(response_data.get("status", "")).strip().lower()
+        action_id = str(response_data.get("id") or response_data.get("action_id") or "")
+        if status_field in ("succeeded", "confirmed", "success"):
+            return (STATUS_CONFIRMED, action_id or None, f"{provider} isolation confirmed.")
+        elif status_field in ("requested", "pending", "in_progress"):
+            return (STATUS_REQUESTED, action_id or None, f"{provider} isolation requested.")
+        elif status_field in ("failed", "error"):
+            return (STATUS_FAILED, action_id or None, f"{provider} isolation failed.")
+        return (
+            STATUS_UNKNOWN,
+            action_id or None,
+            f"Ambiguous response from provider '{provider}'.",
+        )
+
+
+def execute_network_containment(
+    alert: Union[Dict[str, Any], Any],
+    policy: Optional[ContainmentPolicy] = None,
+    dry_run: Optional[bool] = None,
+    edr_client: Optional[Any] = None,
+    comment: Optional[str] = None,
+    force: bool = False,
+    raise_on_invalid: bool = False,
+) -> Dict[str, Any]:
+    """
+    Executes the complete Week 2 Day 2 EDR Network Containment workflow:
+      1. Receives and inspects the incoming security alert.
+      2. Validates alert schema and endpoint identification via Day 1 logic.
+      3. Evaluates containment policy rules.
+      4. If containment is recommended, validates endpoint_id and prepares EDR request.
+      5. Enforces execution modes (MODE A: dry-run default, MODE B: live authorized).
+      6. Enforces duplicate request suppression safeguards.
+      7. Dispatches authorized request to EDR platform (CrowdStrike or Defender).
+      8. Parses and audits the provider response (CONFIRMED, REQUESTED, FAILED, UNKNOWN).
+      9. Updates incident status to CONTAINED in SQLite if confirmed.
+      10. Returns a structured result dictionary.
+
+    Parameters:
+        alert: Incoming alert dictionary or model object.
+        policy: Optional custom ContainmentPolicy instance.
+        dry_run: Explicit dry-run flag. If None, checks EDR_EXECUTION_MODE and EDR_DRY_RUN env vars.
+                 Defaults to True (safe dry-run).
+        edr_client: Optional pre-configured EDR client. If None in live mode, instantiates via factory.
+        comment: Optional administrative rationale for containment request.
+        force: If True, bypasses duplicate request suppression.
+        raise_on_invalid: If True, re-raises ContainmentValidationError if alert is invalid.
+
+    Returns:
+        Dict[str, Any]: Structured result dictionary matching project standards.
+    """
+    # Determine execution mode (dry-run is default)
+    if dry_run is None:
+        env_mode = os.environ.get("EDR_EXECUTION_MODE", "").strip().lower()
+        env_dry = os.environ.get("EDR_DRY_RUN", "").strip().lower()
+        if env_mode == "live" or env_dry in ("false", "0", "no"):
+            is_dry_run = False
+        else:
+            is_dry_run = True  # Default
+    else:
+        is_dry_run = bool(dry_run)
+
+    mode_str = EXECUTION_MODE_DRY_RUN if is_dry_run else EXECUTION_MODE_LIVE
+
+    # 1. Day 1 Containment Policy Evaluation
+    decision = evaluate_containment(
+        alert, policy=policy, dry_run=is_dry_run, raise_on_invalid=raise_on_invalid
+    )
+
+    # 2. Check validation failure
+    if decision["decision"] == DECISION_CONTAINMENT_REJECTED:
+        logger.warning(
+            "Containment rejected during alert validation for alert_id=%s: %s",
+            decision["alert_id"],
+            decision["reason"],
+        )
+        return ContainmentExecutionResult(
+            alert_id=decision["alert_id"],
+            endpoint_id=decision.get("endpoint_id"),
+            hostname=decision.get("hostname"),
+            containment_recommended=False,
+            execution_mode=mode_str,
+            isolation_requested=False,
+            status=STATUS_REJECTED,
+            message=decision["reason"],
+            timestamp=decision.get("timestamp"),
+        ).to_dict()
+
+    # 3. Check policy recommendation
+    if not decision["containment_recommended"]:
+        logger.info(
+            "Containment not recommended for alert_id=%s: %s",
+            decision["alert_id"],
+            decision["reason"],
+        )
+        return ContainmentExecutionResult(
+            alert_id=decision["alert_id"],
+            endpoint_id=decision.get("endpoint_id"),
+            hostname=decision.get("hostname"),
+            containment_recommended=False,
+            execution_mode=mode_str,
+            isolation_requested=False,
+            status=STATUS_NOT_RECOMMENDED,
+            message=f"Containment not recommended: {decision['reason']}",
+            timestamp=decision.get("timestamp"),
+        ).to_dict()
+
+    # 4. Containment is recommended: Validate required endpoint_id
+    raw_endpoint_id = decision.get("endpoint_id")
+    if not raw_endpoint_id or not str(raw_endpoint_id).strip():
+        logger.warning(
+            "Containment recommended for alert_id=%s, but endpoint_id is missing. Isolation rejected.",
+            decision["alert_id"],
+        )
+        return ContainmentExecutionResult(
+            alert_id=decision["alert_id"],
+            endpoint_id=None,
+            hostname=decision.get("hostname"),
+            containment_recommended=True,
+            execution_mode=mode_str,
+            isolation_requested=False,
+            status=STATUS_REJECTED,
+            message="Missing endpoint identifier (endpoint_id); cannot submit EDR isolation request.",
+            timestamp=decision.get("timestamp"),
+        ).to_dict()
+
+    endpoint_id = str(raw_endpoint_id).strip()
+
+    # 5. Check duplicate / cooldown safeguard
+    if not force and _GLOBAL_CONTAINMENT_REGISTRY.is_contained(endpoint_id):
+        rec = _GLOBAL_CONTAINMENT_REGISTRY.get_record(endpoint_id) or {}
+        prior_status = rec.get("status", STATUS_CONFIRMED)
+        action_id = rec.get("action_id")
+        provider = rec.get("provider")
+        logger.info(
+            "Duplicate isolation request suppressed for endpoint_id=%s (current status: %s)",
+            endpoint_id,
+            prior_status,
+        )
+        return ContainmentExecutionResult(
+            alert_id=decision["alert_id"],
+            endpoint_id=endpoint_id,
+            hostname=decision.get("hostname"),
+            containment_recommended=True,
+            execution_mode=mode_str,
+            isolation_requested=False,
+            status=prior_status,
+            message=f"Endpoint '{endpoint_id}' is already contained (duplicate request suppressed).",
+            edr_provider=provider,
+            action_id=action_id,
+            timestamp=decision.get("timestamp"),
+        ).to_dict()
+
+    # 6. MODE A: Dry-Run (Default)
+    if is_dry_run:
+        logger.info(
+            "DRY-RUN CONTAINMENT: alert_id=%s, endpoint_id=%s, hostname=%s. No real request sent.",
+            decision["alert_id"],
+            endpoint_id,
+            decision.get("hostname") or "N/A",
+        )
+        return ContainmentExecutionResult(
+            alert_id=decision["alert_id"],
+            endpoint_id=endpoint_id,
+            hostname=decision.get("hostname"),
+            containment_recommended=True,
+            execution_mode=EXECUTION_MODE_DRY_RUN,
+            isolation_requested=False,
+            status=STATUS_SIMULATED,
+            message="Dry run completed. No EDR request was sent.",
+            edr_provider="simulated",
+            action_id=f"sim-action-{endpoint_id}",
+            timestamp=decision.get("timestamp"),
+        ).to_dict()
+
+    # 7. MODE B: Live Authorized EDR Execution
+    logger.info(
+        "LIVE AUTHORIZED CONTAINMENT: Initiating isolation for alert_id=%s, endpoint_id=%s",
+        decision["alert_id"],
+        endpoint_id,
+    )
+    try:
+        client = edr_client or create_edr_client(simulated=False)
+    except EDRConfigError as cfg_err:
+        logger.error(
+            "EDR configuration error during containment request for alert_id=%s: %s",
+            decision["alert_id"],
+            cfg_err,
+        )
+        return ContainmentExecutionResult(
+            alert_id=decision["alert_id"],
+            endpoint_id=endpoint_id,
+            hostname=decision.get("hostname"),
+            containment_recommended=True,
+            execution_mode=EXECUTION_MODE_LIVE,
+            isolation_requested=False,
+            status=STATUS_FAILED,
+            message=f"EDR configuration error: {cfg_err}",
+            timestamp=decision.get("timestamp"),
+        ).to_dict()
+    except Exception as exc:
+        logger.error(
+            "Failed to initialize EDR client for alert_id=%s: %s",
+            decision["alert_id"],
+            exc,
+        )
+        return ContainmentExecutionResult(
+            alert_id=decision["alert_id"],
+            endpoint_id=endpoint_id,
+            hostname=decision.get("hostname"),
+            containment_recommended=True,
+            execution_mode=EXECUTION_MODE_LIVE,
+            isolation_requested=False,
+            status=STATUS_FAILED,
+            message=f"Client initialization error: {exc}",
+            timestamp=decision.get("timestamp"),
+        ).to_dict()
+
+    # Safely determine provider name (handle strings, Enum, or mock objects)
+    provider_name = getattr(client, "PROVIDER", None)
+    if not provider_name or not isinstance(provider_name, str):
+        if hasattr(client, "config"):
+            cfg = getattr(client, "config")
+            if hasattr(cfg, "provider"):
+                p_val = getattr(cfg, "provider")
+                if hasattr(p_val, "value") and isinstance(p_val.value, str):
+                    provider_name = p_val.value
+                elif isinstance(p_val, str):
+                    provider_name = p_val
+    if not isinstance(provider_name, str):
+        provider_name = "edr_provider"
+    provider_name = provider_name.strip().lower()
+
+    # Submit isolation request
+    try:
+        isolation_resp = client.isolate_endpoint(
+            endpoint_id,
+            comment=comment or f"Automated containment for alert {decision['alert_id']}",
+        )
+    except EDRAuthError as auth_err:
+        logger.error(
+            "EDR authentication failure during isolation of %s for alert_id=%s: %s",
+            endpoint_id,
+            decision["alert_id"],
+            auth_err,
+        )
+        return ContainmentExecutionResult(
+            alert_id=decision["alert_id"],
+            endpoint_id=endpoint_id,
+            hostname=decision.get("hostname"),
+            containment_recommended=True,
+            execution_mode=EXECUTION_MODE_LIVE,
+            isolation_requested=True,
+            status=STATUS_FAILED,
+            message=f"EDR authentication failure: {auth_err}",
+            edr_provider=provider_name,
+            timestamp=decision.get("timestamp"),
+        ).to_dict()
+    except EDRTimeoutError as timeout_err:
+        logger.error(
+            "EDR timeout during isolation of %s for alert_id=%s: %s",
+            endpoint_id,
+            decision["alert_id"],
+            timeout_err,
+        )
+        return ContainmentExecutionResult(
+            alert_id=decision["alert_id"],
+            endpoint_id=endpoint_id,
+            hostname=decision.get("hostname"),
+            containment_recommended=True,
+            execution_mode=EXECUTION_MODE_LIVE,
+            isolation_requested=True,
+            status=STATUS_FAILED,
+            message=f"EDR API timeout: {timeout_err}",
+            edr_provider=provider_name,
+            timestamp=decision.get("timestamp"),
+        ).to_dict()
+    except (EDRConnectionError, EDRAPIError) as api_err:
+        logger.error(
+            "EDR API error during isolation of %s for alert_id=%s: %s",
+            endpoint_id,
+            decision["alert_id"],
+            api_err,
+        )
+        return ContainmentExecutionResult(
+            alert_id=decision["alert_id"],
+            endpoint_id=endpoint_id,
+            hostname=decision.get("hostname"),
+            containment_recommended=True,
+            execution_mode=EXECUTION_MODE_LIVE,
+            isolation_requested=True,
+            status=STATUS_FAILED,
+            message=f"EDR API error: {api_err}",
+            edr_provider=provider_name,
+            timestamp=decision.get("timestamp"),
+        ).to_dict()
+    except Exception as exc:
+        logger.error(
+            "Unexpected error submitting isolation for %s (alert_id=%s): %s",
+            endpoint_id,
+            decision["alert_id"],
+            exc,
+        )
+        return ContainmentExecutionResult(
+            alert_id=decision["alert_id"],
+            endpoint_id=endpoint_id,
+            hostname=decision.get("hostname"),
+            containment_recommended=True,
+            execution_mode=EXECUTION_MODE_LIVE,
+            isolation_requested=True,
+            status=STATUS_FAILED,
+            message=f"Unexpected error submitting isolation: {exc}",
+            edr_provider=provider_name,
+            timestamp=decision.get("timestamp"),
+        ).to_dict()
+
+    # Parse provider response
+    try:
+        res_status, action_id, res_message = parse_edr_isolation_response(
+            provider_name, isolation_resp
+        )
+    except Exception as exc:
+        logger.error(
+            "Error parsing EDR response for alert_id=%s: %s",
+            decision["alert_id"],
+            exc,
+        )
+        res_status = STATUS_UNKNOWN
+        action_id = None
+        res_message = f"Failed to parse provider response: {exc}"
+
+    # Record in duplicate tracking registry if confirmed or requested
+    if res_status in (STATUS_CONFIRMED, STATUS_REQUESTED):
+        _GLOBAL_CONTAINMENT_REGISTRY.record(
+            endpoint_id, decision["alert_id"], provider_name, res_status, action_id
+        )
+
+    # If confirmed, advance incident lifecycle status in database
+    if res_status == STATUS_CONFIRMED:
+        try:
+            from incidents.service import update_incident_status
+            from incidents.models import IncidentStatus
+
+            update_incident_status(decision["alert_id"], IncidentStatus.CONTAINED)
+        except Exception:
+            pass
+
+    logger.info(
+        "EDR containment completed: alert_id=%s, endpoint_id=%s, status=%s, provider=%s, action_id=%s",
+        decision["alert_id"],
+        endpoint_id,
+        res_status,
+        provider_name,
+        action_id or "N/A",
+    )
+
+    return ContainmentExecutionResult(
+        alert_id=decision["alert_id"],
+        endpoint_id=endpoint_id,
+        hostname=decision.get("hostname"),
+        containment_recommended=True,
+        execution_mode=EXECUTION_MODE_LIVE,
+        isolation_requested=True,
+        status=res_status,
+        message=res_message,
+        edr_provider=provider_name,
+        action_id=action_id,
+        timestamp=decision.get("timestamp"),
+    ).to_dict()
+
+
+def main() -> None:
+    """Command-line demonstration of Week 2 Day 1 & Day 2 Network Containment Orchestrator."""
+    print("=" * 75)
+    print("Automated Ransomware Containment -- Network Containment & EDR Orchestration")
+    print("Week 2, Day 1 & Day 2 Integration")
+    print("=" * 75)
+
+    # 1. Sample Critical Ransomware Alert
     sample_alert = {
         "alert_id": "ALERT-1001",
         "severity": "critical",
@@ -560,11 +1207,25 @@ def main() -> None:
     print("\n[+] Input Security Alert:")
     print(json.dumps(sample_alert, indent=2))
 
-    print("\n[+] Evaluating Containment Decision (Dry-Run Mode)...")
+    # Day 1 Policy Evaluation Demo
+    print("\n[+] Step 1: Evaluating Day 1 Policy Decision...")
     decision = evaluate_containment(sample_alert, dry_run=True)
-
-    print("\n[+] Generated Containment Decision:")
     print(json.dumps(decision, indent=2))
+
+    # Day 2 EDR Containment Execution (Dry-Run Mode - Default)
+    print("\n[+] Step 2: Executing EDR Containment Workflow (Dry-Run Mode - Default)...")
+    dry_result = execute_network_containment(sample_alert, dry_run=True)
+    print(json.dumps(dry_result, indent=2))
+
+    # Day 2 EDR Containment with Simulated Client
+    print("\n[+] Step 3: Executing EDR Containment Workflow with Simulated EDR Client...")
+    from integrations.edr_client import SimulatedEDRClient
+
+    sim_client = SimulatedEDRClient()
+    sim_result = execute_network_containment(
+        sample_alert, dry_run=False, edr_client=sim_client
+    )
+    print(json.dumps(sim_result, indent=2))
 
     # Demonstrate Medium Severity Alert (No automatic containment)
     medium_alert = {
@@ -577,19 +1238,30 @@ def main() -> None:
         "username": "lab_user",
         "timestamp": "2026-10-16T11:00:00Z",
     }
-    print("\n[+] Evaluating Medium Severity Alert:")
-    med_decision = evaluate_containment(medium_alert, dry_run=True)
-    print(json.dumps(med_decision, indent=2))
+    print("\n[+] Step 4: Evaluating Medium Severity Alert (No Isolation):")
+    med_result = execute_network_containment(medium_alert, dry_run=True)
+    print(json.dumps(med_result, indent=2))
 
-    # Demonstrate Invalid Alert (Rejection)
+    # Demonstrate Invalid Alert Rejection
     invalid_alert = {
         "alert_id": "ALERT-9999",
         "severity": "unknown_sev",
         "alert_type": "ransomware",
     }
-    print("\n[+] Evaluating Invalid Alert (Malformed severity, missing host ID):")
-    invalid_decision = evaluate_containment(invalid_alert, dry_run=True)
-    print(json.dumps(invalid_decision, indent=2))
+    print("\n[+] Step 5: Evaluating Invalid Alert (Safe Rejection):")
+    invalid_result = execute_network_containment(invalid_alert, dry_run=True)
+    print(json.dumps(invalid_result, indent=2))
+
+    # Demonstrate Missing Endpoint ID Rejection
+    no_endpoint_alert = {
+        "alert_id": "ALERT-3003",
+        "severity": "critical",
+        "alert_type": "ransomware",
+        "hostname": "HOST-ONLY-01",
+    }
+    print("\n[+] Step 6: Missing endpoint_id Rejection:")
+    no_ep_result = execute_network_containment(no_endpoint_alert, dry_run=True)
+    print(json.dumps(no_ep_result, indent=2))
 
 
 if __name__ == "__main__":

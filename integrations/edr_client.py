@@ -1,4 +1,4 @@
-﻿# integrations/edr_client.py
+# integrations/edr_client.py
 """
 EDR (Endpoint Detection and Response) API Integration Module
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -36,7 +36,7 @@ SECURITY NOTES
 import logging
 import os
 from enum import Enum
-from typing import Any
+from typing import Any, Dict, List, Optional
 
 import requests
 from requests import Response
@@ -141,6 +141,14 @@ class BaseEDRClient:
     def authenticate(self) -> None:
         raise NotImplementedError("Subclasses must implement authenticate().")
 
+    def isolate_endpoint(self, endpoint_id: str, comment: Optional[str] = None) -> dict:
+        """Requests network isolation/containment for an affected endpoint."""
+        raise NotImplementedError("Subclasses must implement isolate_endpoint().")
+
+    def lift_containment(self, endpoint_id: str, comment: Optional[str] = None) -> dict:
+        """Lifts network isolation/containment for an affected endpoint."""
+        raise NotImplementedError("Subclasses must implement lift_containment().")
+
     def _get(self, path: str, params: dict = None) -> dict:
         self._ensure_authenticated()
         url = self.config.api_base_url.rstrip("/") + path
@@ -182,7 +190,10 @@ class BaseEDRClient:
             response.raise_for_status()
         except HTTPError as exc:
             raise EDRAPIError(f"EDR API returned an error: {response.status_code} -- {exc}")
-        return response.json()
+        try:
+            return response.json()
+        except Exception as exc:
+            raise EDRAPIError(f"EDR API returned non-JSON or malformed response: {exc}")
 
     def _ensure_authenticated(self) -> None:
         if not self._access_token:
@@ -198,6 +209,7 @@ class CrowdStrikeClient(BaseEDRClient):
     Docs: https://falcon.crowdstrike.com/documentation/46/crowdstrike-oauth2-based-apis
     """
 
+    PROVIDER = "crowdstrike"
     TOKEN_PATH = "/oauth2/token"
     DETECTIONS_PATH = "/detects/queries/detects/v1"
     DETECTION_DETAIL_PATH = "/detects/entities/summaries/GET/v1"
@@ -233,6 +245,8 @@ class CrowdStrikeClient(BaseEDRClient):
         self._session.headers.update({"Authorization": f"Bearer {self._access_token}"})
         logger.info("CrowdStrike authentication successful. Token obtained.")
 
+    CONTAIN_ACTION_PATH = "/devices/entities/devices-actions/v2"
+
     def get_detections(self, limit: int = 10) -> dict:
         logger.info("Fetching up to %d detection(s) from CrowdStrike.", limit)
         return self._get(self.DETECTIONS_PATH, params={"limit": limit})
@@ -240,6 +254,32 @@ class CrowdStrikeClient(BaseEDRClient):
     def get_detection_details(self, detection_ids: list) -> dict:
         logger.info("Fetching details for %d detection ID(s).", len(detection_ids))
         return self._post(self.DETECTION_DETAIL_PATH, payload={"ids": detection_ids})
+
+    def isolate_endpoint(self, endpoint_id: str, comment: Optional[str] = None) -> dict:
+        """
+        Requests network containment for a host via CrowdStrike Falcon API.
+        Endpoint: POST /devices/entities/devices-actions/v2?action_name=contain
+        Payload: {"ids": [endpoint_id]}
+        """
+        logger.info("Submitting CrowdStrike Falcon network containment for endpoint_id=%s", endpoint_id)
+        url_path = f"{self.CONTAIN_ACTION_PATH}?action_name=contain"
+        payload: dict = {"ids": [endpoint_id]}
+        if comment:
+            payload["comment"] = comment
+        return self._post(url_path, payload=payload)
+
+    def lift_containment(self, endpoint_id: str, comment: Optional[str] = None) -> dict:
+        """
+        Lifts network containment for a host via CrowdStrike Falcon API.
+        Endpoint: POST /devices/entities/devices-actions/v2?action_name=lift_containment
+        Payload: {"ids": [endpoint_id]}
+        """
+        logger.info("Submitting CrowdStrike Falcon lift-containment for endpoint_id=%s", endpoint_id)
+        url_path = f"{self.CONTAIN_ACTION_PATH}?action_name=lift_containment"
+        payload: dict = {"ids": [endpoint_id]}
+        if comment:
+            payload["comment"] = comment
+        return self._post(url_path, payload=payload)
 
 
 # Microsoft Defender for Endpoint Client
@@ -250,6 +290,7 @@ class DefenderClient(BaseEDRClient):
     Docs: https://learn.microsoft.com/en-us/microsoft-365/security/defender-endpoint/exposed-apis-create-app-webapp
     """
 
+    PROVIDER = "defender"
     AZURE_TOKEN_URL_TEMPLATE = "https://login.microsoftonline.com/{tenant_id}/oauth2/token"
     RESOURCE = "https://api.securitycenter.microsoft.com"
     ALERTS_PATH = "/api/alerts"
@@ -293,6 +334,33 @@ class DefenderClient(BaseEDRClient):
     def get_alerts(self, top: int = 10) -> dict:
         logger.info("Fetching up to %d alert(s) from Defender.", top)
         return self._get(self.ALERTS_PATH, params={"$top": top})
+
+    def isolate_endpoint(self, endpoint_id: str, comment: Optional[str] = None) -> dict:
+        """
+        Requests machine isolation in Microsoft Defender for Endpoint.
+        Endpoint: POST /api/machines/{id}/isolate
+        Payload: {"Comment": comment, "IsolationType": "Full"}
+        """
+        logger.info("Submitting Microsoft Defender machine isolation for machine_id=%s", endpoint_id)
+        path = f"/api/machines/{endpoint_id}/isolate"
+        payload = {
+            "Comment": comment or "Automated ransomware containment isolation request",
+            "IsolationType": "Full",
+        }
+        return self._post(path, payload=payload)
+
+    def lift_containment(self, endpoint_id: str, comment: Optional[str] = None) -> dict:
+        """
+        Lifts machine isolation in Microsoft Defender for Endpoint.
+        Endpoint: POST /api/machines/{id}/unisolate
+        Payload: {"Comment": comment}
+        """
+        logger.info("Submitting Microsoft Defender machine unisolate for machine_id=%s", endpoint_id)
+        path = f"/api/machines/{endpoint_id}/unisolate"
+        payload = {
+            "Comment": comment or "Automated containment release",
+        }
+        return self._post(path, payload=payload)
 
 
 # Simulated EDR Client (safe for testing without real credentials)
@@ -353,6 +421,31 @@ class SimulatedEDRClient:
                     "alertCreationTime": "2026-10-11T00:00:00Z",
                 }
             ][:top]
+        }
+
+    def isolate_endpoint(self, endpoint_id: str, comment: Optional[str] = None) -> dict:
+        """Simulates network isolation without executing any real API calls."""
+        logger.info("[SIMULATED] Executing simulated network isolation for endpoint_id=%s", endpoint_id)
+        return {
+            "status": "simulated",
+            "action": "isolate",
+            "endpoint_id": endpoint_id,
+            "complete": True,
+            "action_id": f"sim-action-{endpoint_id}",
+            "message": f"Simulated endpoint network isolation successful for {endpoint_id}.",
+            "isolation_type": "Full",
+        }
+
+    def lift_containment(self, endpoint_id: str, comment: Optional[str] = None) -> dict:
+        """Simulates lifting network isolation without executing any real API calls."""
+        logger.info("[SIMULATED] Executing simulated lift-containment for endpoint_id=%s", endpoint_id)
+        return {
+            "status": "simulated",
+            "action": "lift_containment",
+            "endpoint_id": endpoint_id,
+            "complete": True,
+            "action_id": f"sim-lift-{endpoint_id}",
+            "message": f"Simulated lift containment successful for {endpoint_id}.",
         }
 
 

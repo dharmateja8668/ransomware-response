@@ -108,6 +108,7 @@ class Alert(BaseModel):
 
     # Optional fields for enriched endpoint context
     hostname: Optional[str] = Field(None, description="Host / computer affected")
+    endpoint_id: Optional[str] = Field(None, description="Unique EDR endpoint / machine identifier")
     ip_address: Optional[str] = Field(None, description="IP address of endpoint")
     username: Optional[str] = Field(None, description="User account associated with the event")
     process_hash: Optional[str] = Field(None, description="Hash of offending process or file")
@@ -165,27 +166,31 @@ def receive_alert(alert: Alert) -> dict:
 @app.post("/webhook/edr", status_code=status.HTTP_200_OK)
 def receive_edr_webhook(
     alert: Alert,
+    dry_run: Optional[bool] = None,
     _auth: str = Depends(verify_webhook_secret),
 ) -> dict:
     """
-    Secure webhook endpoint for receiving simulated EDR alerts.
+    Secure webhook endpoint for receiving simulated EDR alerts and coordinating
+    automated containment workflows (Week 2 Day 3).
 
     Workflow:
       1. Authenticates request via shared secret in headers (constant-time verification).
       2. Validates JSON payload against the Alert model (required & optional fields).
       3. Extracts essential fields and safely logs alert metadata (no secrets logged).
       4. Stores the incoming alert as an incident record in SQLite (idempotent for retries).
-      5. Returns JSON confirmation acknowledgement.
-
-    No destructive containment or automated endpoint actions are executed on Day 4.
+      5. Passes normalized alert data to the containment decision and EDR execution coordinator.
+      6. Enforces safe dry-run simulation mode by default.
+      7. Transitions incident status in SQLite store based on containment outcome.
+      8. Returns structured confirmation acknowledgement with containment telemetry.
     """
     # Safe logging of alert details without exposing sensitive auth tokens
     logger.info(
-        "EDR Webhook alert received safely: alert_id=%s, threat_type=%s, severity=%d, hostname=%s, ip_address=%s",
+        "EDR Webhook alert received safely: alert_id=%s, threat_type=%s, severity=%d, hostname=%s, endpoint_id=%s, ip_address=%s",
         alert.alert_id,
         alert.threat_type,
         alert.severity,
         alert.hostname or "N/A",
+        alert.endpoint_id or "N/A",
         alert.ip_address or "N/A",
     )
 
@@ -242,13 +247,25 @@ def receive_edr_webhook(
             detail="Failed to store incident record securely.",
         )
 
+    # Week 2 Day 3: Execute containment workflow for ingested alert
+    containment_payload = parsed_alert.to_dict()
+    if alert.endpoint_id:
+        containment_payload["endpoint_id"] = alert.endpoint_id
+
+    containment_res = execute_network_containment(containment_payload, dry_run=dry_run)
+
+    # Refresh incident status from SQLite to reflect any transition (e.g. to CONTAINED or INVESTIGATING)
+    refreshed = get_incident_by_alert_id(parsed_alert.alert_id)
+    current_status = refreshed.status.value if refreshed else stored.status.value
+
     return {
         "status": "received",
         "alert_id": parsed_alert.alert_id,
         "message": f"EDR webhook alert '{parsed_alert.alert_id}' of type '{parsed_alert.threat_type}' processed successfully.",
         "threat_type": parsed_alert.threat_type,
         "severity": parsed_alert.severity,
-        "incident_status": stored.status.value,
+        "incident_status": current_status,
+        "containment": containment_res,
     }
 
 

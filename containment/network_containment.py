@@ -619,6 +619,12 @@ class ContainmentRegistry:
     """
     Thread-safe registry tracking containment actions to prevent redundant or duplicate
     isolation requests from being sent to the EDR platform.
+
+    LIMITATIONS & ARCHITECTURE:
+      - This registry is an in-memory, process-local store protected by a threading lock.
+      - It reliably protects against concurrent duplicate requests within a single runtime process.
+      - It does NOT persist state across application restarts or synchronize across multiple
+        horizontal worker processes without an external distributed store (such as Redis).
     """
 
     def __init__(self, cooldown_seconds: int = 300) -> None:
@@ -662,6 +668,11 @@ class ContainmentRegistry:
                 "action_id": action_id,
                 "time": datetime.now(timezone.utc),
             }
+
+    def release(self, endpoint_id: str) -> bool:
+        """Removes an endpoint record from the registry (e.g. upon uncontainment)."""
+        with self._lock:
+            return bool(self._records.pop(endpoint_id, None))
 
     def clear(self) -> None:
         """Clears all stored containment records."""
@@ -1151,15 +1162,29 @@ def execute_network_containment(
             endpoint_id, decision["alert_id"], provider_name, res_status, action_id
         )
 
-    # If confirmed, advance incident lifecycle status in database
-    if res_status == STATUS_CONFIRMED:
-        try:
-            from incidents.service import update_incident_status
-            from incidents.models import IncidentStatus
+    # Advance incident lifecycle status in database
+    try:
+        from incidents.service import get_incident_by_alert_id, update_incident_status
+        from incidents.models import IncidentStatus
 
-            update_incident_status(decision["alert_id"], IncidentStatus.CONTAINED)
-        except Exception:
-            pass
+        inc = get_incident_by_alert_id(decision["alert_id"])
+        if inc:
+            if res_status == STATUS_CONFIRMED:
+                update_incident_status(decision["alert_id"], IncidentStatus.CONTAINED)
+                logger.info(
+                    "Incident %s transitioned to %s following confirmed EDR isolation.",
+                    decision["alert_id"],
+                    IncidentStatus.CONTAINED.value,
+                )
+            elif res_status == STATUS_REQUESTED and inc.status == IncidentStatus.NEW:
+                update_incident_status(decision["alert_id"], IncidentStatus.INVESTIGATING)
+                logger.info(
+                    "Incident %s transitioned to %s following requested EDR isolation.",
+                    decision["alert_id"],
+                    IncidentStatus.INVESTIGATING.value,
+                )
+    except Exception as db_err:
+        logger.debug("Database incident status synchronization skipped or failed: %s", db_err)
 
     logger.info(
         "EDR containment completed: alert_id=%s, endpoint_id=%s, status=%s, provider=%s, action_id=%s",
@@ -1183,6 +1208,125 @@ def execute_network_containment(
         action_id=action_id,
         timestamp=decision.get("timestamp"),
     ).to_dict()
+
+
+def process_containment_workflow(
+    alert: Union[Dict[str, Any], Any],
+    policy: Optional[ContainmentPolicy] = None,
+    dry_run: Optional[bool] = None,
+    edr_client: Optional[Any] = None,
+    comment: Optional[str] = None,
+    force: bool = False,
+    record_incident: bool = True,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Week 2 Day 3: Complete End-to-End Network Containment Workflow Orchestrator.
+    Processes a security alert from ingestion through validation, policy evaluation,
+    duplicate check, EDR isolation execution, and incident status recording.
+
+    Workflow Stages:
+      1. Receives security alert telemetry.
+      2. Parses and validates alert structure (Day 1 schema).
+      3. Identifies target endpoint (hostname and endpoint_id).
+      4. Stores or reuses incident record in SQLite (initial status: NEW).
+      5. Evaluates Day 1 containment policy rules.
+      6. Rejects alerts that do not qualify for containment.
+      7. Checks duplicate request registry against cooldown.
+      8. Dispatches containment execution in dry-run (default) or live mode.
+      9. Processes provider response.
+      10. Records execution result and updates incident status (CONFIRMED -> CONTAINED, REQUESTED -> INVESTIGATING).
+      11. Returns structured execution outcome dictionary including incident_status.
+      12. Logs workflow outcome safely without leaking secrets.
+
+    Parameters:
+        alert: Incoming alert dictionary or structured model.
+        policy: Optional custom ContainmentPolicy instance.
+        dry_run: Execution mode toggle. None defaults to EDR_EXECUTION_MODE or True.
+        edr_client: Pre-configured or mocked EDR client.
+        comment: Administrative containment justification.
+        force: If True, bypasses duplicate request suppression.
+        record_incident: Whether to store/update the incident in SQLite.
+        db_path: Optional override path to the SQLite database.
+
+    Returns:
+        Dict[str, Any]: Structured execution result dictionary including incident_status.
+    """
+    # 1. Log alert received safely
+    raw_alert_id = "UNKNOWN"
+    if isinstance(alert, dict):
+        raw_alert_id = str(alert.get("alert_id") or "UNKNOWN")
+    elif hasattr(alert, "alert_id"):
+        raw_alert_id = str(getattr(alert, "alert_id") or "UNKNOWN")
+
+    logger.info("Containment workflow initiated for alert_id=%s", raw_alert_id)
+
+    # 2. Record / retrieve incident in database if record_incident is True
+    if record_incident:
+        try:
+            from incidents.service import get_incident_by_alert_id, create_incident
+            from incidents.models import IncidentCreate, IncidentStatus
+
+            existing_inc = get_incident_by_alert_id(raw_alert_id, db_path=db_path)
+            if not existing_inc:
+                # Extract alert fields safely
+                a_data = alert if isinstance(alert, dict) else (
+                    alert.model_dump() if hasattr(alert, "model_dump") else
+                    (alert.dict() if hasattr(alert, "dict") else vars(alert))
+                )
+                if isinstance(a_data, dict) and a_data.get("alert_id"):
+                    raw_sev = a_data.get("severity", 5)
+                    try:
+                        norm_sev = normalize_severity(raw_sev)
+                    except Exception:
+                        norm_sev = 5
+                    inc_create = IncidentCreate(
+                        alert_id=str(a_data.get("alert_id")),
+                        threat_type=str(a_data.get("threat_type") or a_data.get("alert_type") or "security_alert"),
+                        severity=norm_sev,
+                        description=str(a_data.get("description") or f"Incident recorded for alert {raw_alert_id}"),
+                        timestamp=str(a_data.get("timestamp") or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")),
+                        hostname=_clean_string(a_data.get("hostname")),
+                        ip_address=_clean_string(a_data.get("ip_address")),
+                        username=_clean_string(a_data.get("username")),
+                        process_hash=_clean_string(a_data.get("process_hash")),
+                        status=IncidentStatus.NEW,
+                    )
+                    create_incident(inc_create, db_path=db_path)
+                    logger.info("Initial incident %s recorded with status NEW in SQLite.", raw_alert_id)
+        except Exception as db_err:
+            logger.debug("Database incident recording skipped or unavailable: %s", db_err)
+
+    # 3. Execute containment logic
+    result = execute_network_containment(
+        alert=alert,
+        policy=policy,
+        dry_run=dry_run,
+        edr_client=edr_client,
+        comment=comment,
+        force=force,
+        raise_on_invalid=False,
+    )
+
+    # 4. Attach synchronized incident status
+    if record_incident:
+        try:
+            from incidents.service import get_incident_by_alert_id
+            inc = get_incident_by_alert_id(result["alert_id"], db_path=db_path)
+            result["incident_status"] = inc.status.value if inc else None
+        except Exception:
+            result["incident_status"] = None
+    else:
+        result["incident_status"] = None
+
+    logger.info(
+        "Containment workflow completed for alert_id=%s: status=%s, incident_status=%s",
+        result.get("alert_id"),
+        result.get("status"),
+        result.get("incident_status") or "N/A",
+    )
+
+    return result
 
 
 def main() -> None:

@@ -13,15 +13,16 @@ An automated incident response orchestration platform designed to intake endpoin
 6. [Incident Data Management & Storage (SQLite)](#incident-data-management--storage-sqlite)
 7. [Network Containment Decision Logic (Week 2 Day 1)](#network-containment-decision-logic-week-2-day-1)
 8. [Week 2 Day 2 — EDR Integration and Network Isolation](#week-2-day-2--edr-integration-and-network-isolation)
-9. [API Endpoints](#api-endpoints)
-10. [Working with Incidents](#working-with-incidents)
-11. [Sending Test Alerts](#sending-test-alerts)
-12. [Duplicate Alert Handling (Idempotency)](#duplicate-alert-handling-idempotency)
-13. [Configuration & Environment Setup](#configuration--environment-setup)
-14. [Running the Application](#running-the-application)
-15. [Running the Test Suite](#running-the-test-suite)
-16. [Current Limitations](#current-limitations)
-17. [Security Best Practices](#security-best-practices)
+9. [Week 2 Day 3 — Containment Workflow Validation](#week-2-day-3--containment-workflow-validation)
+10. [API Endpoints](#api-endpoints)
+11. [Working with Incidents](#working-with-incidents)
+12. [Sending Test Alerts](#sending-test-alerts)
+13. [Duplicate Alert Handling (Idempotency)](#duplicate-alert-handling-idempotency)
+14. [Configuration & Environment Setup](#configuration--environment-setup)
+15. [Running the Application](#running-the-application)
+16. [Running the Test Suite](#running-the-test-suite)
+17. [Current Limitations](#current-limitations)
+18. [Security Best Practices](#security-best-practices)
 
 ---
 
@@ -299,9 +300,96 @@ The orchestrator returns structured results matching the following states:
 # Run all Week 2 Day 2 EDR Containment tests (36 tests)
 .\venv\Scripts\pytest.exe tests/test_network_containment_edr.py -v
 
-# Run the complete project test suite (150 tests)
+# Run the complete project test suite (166 tests)
 .\venv\Scripts\pytest.exe -v
 ```
+
+---
+
+## Week 2 Day 3 — Containment Workflow Validation
+
+### Overview
+Week 2 Day 3 integrates and end-to-end validates the entire automated network containment pipeline—connecting alert intake through schema normalization, policy decision evaluation, duplicate suppression, EDR client execution, and transactional SQLite incident state transitions.
+
+### The Complete Alert-to-Containment Workflow
+The orchestrated pipeline follows a strict, safe, 13-stage progression:
+1. **Alert Ingestion**: Security alert telemetry is received via the secure webhook (`POST /webhook/edr`) or direct orchestration API (`POST /containment/isolate` / `process_containment_workflow`).
+2. **Authentication Verification**: Request authenticity is validated using constant-time comparison against `WEBHOOK_SECRET` without leaking secrets in logs or responses.
+3. **Parsing & Normalization**: `integrations/alert_parser.py` validates required fields, standardizes timestamps to ISO 8601 UTC, sanitizes telemetry strings, extracts `endpoint_id`, and maps severities into a uniform 1–5 scale.
+4. **Endpoint Identification**: The compromised machine's `hostname` and `endpoint_id` are identified and verified.
+5. **Initial Incident Recording**: The alert is recorded in the SQLite incident store with initial status `NEW` (idempotently recognizing duplicates).
+6. **Day 1 Containment Policy Evaluation**: `evaluate_containment()` evaluates active policy rules against the normalized telemetry (e.g., critical ransomware, hands-on-keyboard activity).
+7. **Policy Gatekeeper**: Alerts that do not qualify (medium/low severity) or are malformed receive `NOT_RECOMMENDED` or `REJECTED`. The EDR API is never contacted for unqualified alerts.
+8. **Endpoint Identifier Verification**: If containment is recommended, `endpoint_id` must be present. If missing, isolation is safely rejected (`REJECTED`) without contacting EDR.
+9. **Duplicate Request Protection**: `ContainmentRegistry` checks if the endpoint has an active isolation record within the cooldown window (default: 300 seconds). If already contained, duplicate requests are suppressed without calling EDR.
+10. **Execution Mode Enforcement**: Dry-run mode (`dry_run=True`) is enabled by default. In dry-run mode, the workflow returns `SIMULATED` with zero outbound EDR calls. Live mode (`dry_run=False`) dispatches the isolation request to the configured EDR client.
+11. **EDR Response Processing**: `parse_edr_isolation_response()` maps provider-specific payloads to standard statuses (`CONFIRMED`, `REQUESTED`, `FAILED`, `UNKNOWN`). Never reports false success on failure.
+12. **Incident Store Synchronization**:
+    - `CONFIRMED`: Incident transitions to `CONTAINED`.
+    - `REQUESTED`: Incident transitions from `NEW` to `INVESTIGATING` (retains pending state).
+    - `FAILED` / `UNKNOWN` / `SIMULATED` / `NOT_RECOMMENDED` / `REJECTED`: Incident is never marked `CONTAINED`.
+13. **Structured Response & Safe Audit Logging**: Returns a structured outcome dictionary with incident state, and writes audit logs without sensitive tokens or credentials.
+
+### Relationship Between Day 1, Day 2, and Day 3
+- **Day 1 (Policy Logic)**: Defined policy rules (`ContainmentPolicy`) and pure decision logic (`evaluate_containment`), outputting recommendations (`CONTAINMENT_RECOMMENDED`, `CONTAINMENT_NOT_RECOMMENDED`, `CONTAINMENT_REJECTED`) without external side-effects or network calls.
+- **Day 2 (EDR Integration)**: Implemented EDR API clients (`CrowdStrikeClient`, `DefenderClient`, `SimulatedEDRClient`) and `execute_network_containment`, supporting execution modes and provider response parsing.
+- **Day 3 (Workflow Integration & Validation)**: Bridges ingestion and containment together into an end-to-end orchestrated workflow (`process_containment_workflow` and `/webhook/edr`), binds containment results to the SQLite incident lifecycle, validates duplicate protection cooldowns and failure handling, and provides an end-to-end automated test suite covering all 20 required scenarios.
+
+### How Dry-Run Mode Works
+- **Default Behavior**: Enabled by default (`dry_run=True` in code, `EDR_EXECUTION_MODE=dry_run` or `EDR_DRY_RUN=true` in environment).
+- **Safety Guarantee**: Evaluates telemetry and policy, but bypasses all outbound EDR network calls. Returns `status="SIMULATED"`, `isolation_requested=false`.
+- **Database Safety**: Incidents remain in `NEW` status and are never marked `CONTAINED` during dry-run simulation.
+
+### Incident Lifecycle Transitions
+| Containment Outcome | Previous Incident Status | New Incident Status | Description |
+|---|---|---|---|
+| `CONFIRMED` | `NEW` / `INVESTIGATING` | `CONTAINED` | Successful live isolation confirmed by EDR platform |
+| `REQUESTED` | `NEW` | `INVESTIGATING` | Isolation request accepted by EDR; queued or in-progress |
+| `FAILED` | `NEW` | `NEW` (Unchanged) | EDR error/timeout; never falsely marked CONTAINED |
+| `UNKNOWN` | `NEW` | `NEW` (Unchanged) | Ambiguous EDR response; preserves uncertainty |
+| `SIMULATED` | `NEW` | `NEW` (Unchanged) | Dry-run mode completed; no real isolation |
+| `NOT_RECOMMENDED`| `NEW` | `NEW` (Unchanged) | Policy rejected containment (e.g. low severity) |
+| `REJECTED` | `NEW` | `NEW` (Unchanged) | Missing `endpoint_id` or malformed alert |
+
+### Duplicate Request Protection (ContainmentRegistry)
+- **Cooldown Window**: Tracks isolated endpoints within a configurable cooldown window (default: 300 seconds).
+- **Suppression Behavior**: Subsequent alerts for an endpoint already `CONFIRMED` or `REQUESTED` return the prior status with `isolation_requested=false`, preventing EDR API spamming.
+- **Independent Endpoint Tracking**: Separate endpoints receive independent tracking and do not block one another.
+- **Failure Retry Guarantee**: Failed isolation attempts (`STATUS_FAILED`) are deliberately NOT stored in the registry, permitting immediate retries.
+- **In-Memory Limitation**: The registry is an in-memory, process-local store protected by `threading.Lock`. It prevents duplicate requests within a single runtime process, but does not persist across restarts or across multi-process workers without an external distributed store like Redis.
+
+### Failure Handling & Safeguards
+- **Authentication Failures (`EDRAuthError`)**: Caught safely, logged without leaking secrets or tokens, status marked `FAILED`.
+- **API Timeouts (`EDRTimeoutError`)**: Caught safely after the configured timeout (default: 10s), status marked `FAILED`.
+- **Server Errors (`EDRAPIError`)**: HTTP 5xx responses mapped to `FAILED` without crashing the service.
+- **Malformed Responses**: Responses lacking expected resource arrays or status fields map to `UNKNOWN`.
+- **No False Success**: The orchestrator never converts an API failure or timeout into a simulated or confirmed success.
+
+### Running the Application Locally
+```powershell
+# Activate virtual environment
+.\venv\Scripts\Activate.ps1
+
+# Run the FastAPI server via Uvicorn
+uvicorn main:app --host 127.0.0.1 --port 8000 --reload
+```
+
+### Running the Automated Test Suite
+```powershell
+# Run the complete test suite (166 tests passing)
+.\venv\Scripts\pytest -v
+
+# Run the end-to-end workflow validation suite specifically (18 tests)
+.\venv\Scripts\pytest -v tests/test_e2e_workflow.py
+
+# Run Day 1 and Day 2 containment tests
+.\venv\Scripts\pytest -v tests/test_network_containment.py tests/test_network_containment_edr.py
+```
+
+### Current Limitations & Testing Disclosures
+- **Mock-Based Testing**: All 166 automated unit and integration tests execute exclusively using mocked EDR clients (`SimulatedEDRClient` or `unittest.mock.MagicMock`) and an isolated temporary SQLite database.
+- **Zero Real Endpoint Isolation**: Automated tests do NOT isolate real production or development endpoints. No outbound EDR API calls are made during tests.
+- **Live EDR Tenant Verification Notice**: Live integration against production CrowdStrike Falcon or Microsoft Defender for Endpoint tenants has NOT been verified on live infrastructure. Verification requires an authorized non-production sandbox environment with canary virtual machines, out-of-band serial/hypervisor console access, and properly scoped OAuth 2.0 API credentials.
 
 ---
 

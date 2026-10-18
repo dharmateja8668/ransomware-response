@@ -38,6 +38,7 @@ from containment.network_containment import (
     execute_network_containment,
     get_containment_registry,
     parse_edr_isolation_response,
+    process_containment_workflow,
     validate_alert,
 )
 
@@ -66,5 +67,6 @@ __all__ = [
     "execute_network_containment",
     "get_containment_registry",
     "parse_edr_isolation_response",
+    "process_containment_workflow",
     "validate_alert",
 ]

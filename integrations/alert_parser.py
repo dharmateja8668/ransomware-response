@@ -161,6 +161,7 @@ class ParsedAlert:
     severity_label: str
     is_ransomware: bool
     raw_payload: Dict[str, Any]
+    endpoint_id: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Converts parsed alert fields to dictionary matching Incident model attributes."""
@@ -171,6 +172,7 @@ class ParsedAlert:
             "description": self.description,
             "timestamp": self.timestamp,
             "hostname": self.hostname,
+            "endpoint_id": self.endpoint_id,
             "ip_address": self.ip_address,
             "username": self.username,
             "process_hash": self.process_hash,
@@ -229,6 +231,7 @@ def parse_and_enrich_alert(raw_data: Union[Dict[str, Any], Any]) -> ParsedAlert:
 
     # 4. Clean optional telemetry fields
     hostname = _clean_optional_string(data.get("hostname"))
+    endpoint_id = _clean_optional_string(data.get("endpoint_id"))
     ip_address = _clean_optional_string(data.get("ip_address"))
     username = _clean_optional_string(data.get("username"))
     process_hash = _clean_hash(data.get("process_hash"))
@@ -248,6 +251,7 @@ def parse_and_enrich_alert(raw_data: Union[Dict[str, Any], Any]) -> ParsedAlert:
         description=description,
         timestamp=norm_timestamp,
         hostname=hostname,
+        endpoint_id=endpoint_id,
         ip_address=ip_address,
         username=username,
         process_hash=process_hash,

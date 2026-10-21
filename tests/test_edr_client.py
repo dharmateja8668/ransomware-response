@@ -1,4 +1,4 @@
-﻿# tests/test_edr_client.py
+# tests/test_edr_client.py
 """
 Unit tests for integrations/edr_client.py
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -29,6 +29,7 @@ from unittest.mock import MagicMock, patch
 # ── Import the module under test ───────────────────────────────────────────────
 from integrations.edr_client import (
     CrowdStrikeClient,
+    EDRAPIError,
     EDRAuthError,
     EDRConfig,
     EDRConfigError,
@@ -271,3 +272,248 @@ def test_fastapi_alert_endpoint_invalid():
     client = TestClient(app)
     response = client.post("/alert", json={"alert_id": "only-one-field"})
     assert response.status_code == 422
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 14: CrowdStrikeClient.get_detections() succeeds with Falcon Alerts API
+# ─────────────────────────────────────────────────────────────────────────────
+def test_crowdstrike_get_detections_success(monkeypatch):
+    """get_detections() queries /alerts/queries/alerts/v1 and returns resources."""
+    for key, value in CROWDSTRIKE_ENV.items():
+        monkeypatch.setenv(key, value)
+    config = EDRConfig()
+    client = CrowdStrikeClient(config)
+    client._access_token = "mock-token"
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "meta": {"pagination": {"offset": 0, "limit": 5, "total": 2}},
+        "resources": ["composite:001", "composite:002"],
+        "errors": [],
+    }
+
+    with patch.object(client._session, "get", return_value=mock_resp) as mock_get:
+        result = client.get_detections(limit=5)
+        assert result["resources"] == ["composite:001", "composite:002"]
+        mock_get.assert_called_once()
+        called_url = mock_get.call_args[0][0]
+        called_params = mock_get.call_args[1]["params"]
+        assert called_url.endswith("/alerts/queries/alerts/v1")
+        assert called_params == {"limit": 5}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 15: CrowdStrikeClient.get_detections() handles empty results cleanly
+# ─────────────────────────────────────────────────────────────────────────────
+def test_crowdstrike_get_detections_empty(monkeypatch):
+    """get_detections() cleanly returns empty list when no alerts/detections exist."""
+    for key, value in CROWDSTRIKE_ENV.items():
+        monkeypatch.setenv(key, value)
+    config = EDRConfig()
+    client = CrowdStrikeClient(config)
+    client._access_token = "mock-token"
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "meta": {"pagination": {"offset": 0, "limit": 10, "total": 0}},
+        "resources": [],
+        "errors": [],
+    }
+
+    with patch.object(client._session, "get", return_value=mock_resp):
+        result = client.get_detections()
+        assert result["resources"] == []
+        assert result["meta"]["pagination"]["total"] == 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 16: CrowdStrikeClient.get_detections() raises EDRAuthError on HTTP 403
+# ─────────────────────────────────────────────────────────────────────────────
+def test_crowdstrike_get_detections_permission_403(monkeypatch):
+    """get_detections() must raise EDRAuthError with scope details on HTTP 403."""
+    for key, value in CROWDSTRIKE_ENV.items():
+        monkeypatch.setenv(key, value)
+    config = EDRConfig()
+    client = CrowdStrikeClient(config)
+    client._access_token = "mock-token"
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 403
+
+    with patch.object(client._session, "get", return_value=mock_resp):
+        with pytest.raises(EDRAuthError, match="403"):
+            client.get_detections()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 17: CrowdStrikeClient.get_detections() raises EDRTimeoutError on timeout
+# ─────────────────────────────────────────────────────────────────────────────
+def test_crowdstrike_get_detections_timeout(monkeypatch):
+    """get_detections() must raise EDRTimeoutError when API times out."""
+    from requests.exceptions import Timeout as RequestsTimeout
+
+    for key, value in CROWDSTRIKE_ENV.items():
+        monkeypatch.setenv(key, value)
+    config = EDRConfig()
+    client = CrowdStrikeClient(config)
+    client._access_token = "mock-token"
+
+    with patch.object(client._session, "get", side_effect=RequestsTimeout()):
+        with pytest.raises(EDRTimeoutError):
+            client.get_detections()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 18: CrowdStrikeClient.get_detections() raises EDRAPIError on malformed response
+# ─────────────────────────────────────────────────────────────────────────────
+def test_crowdstrike_get_detections_malformed_response(monkeypatch):
+    """get_detections() raises EDRAPIError if response cannot be parsed as JSON."""
+    for key, value in CROWDSTRIKE_ENV.items():
+        monkeypatch.setenv(key, value)
+    config = EDRConfig()
+    client = CrowdStrikeClient(config)
+    client._access_token = "mock-token"
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.side_effect = ValueError("Invalid JSON")
+
+    with patch.object(client._session, "get", return_value=mock_resp):
+        with pytest.raises(EDRAPIError, match="malformed"):
+            client.get_detections()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 19: CrowdStrikeClient.get_detections() falls back to legacy endpoint on 404
+# ─────────────────────────────────────────────────────────────────────────────
+def test_crowdstrike_get_detections_fallback_on_404(monkeypatch):
+    """get_detections() gracefully falls back to legacy detects endpoint on 404."""
+    for key, value in CROWDSTRIKE_ENV.items():
+        monkeypatch.setenv(key, value)
+    config = EDRConfig()
+    client = CrowdStrikeClient(config)
+    client._access_token = "mock-token"
+
+    resp_404 = MagicMock()
+    resp_404.status_code = 404
+    from requests.exceptions import HTTPError
+    resp_404.raise_for_status.side_effect = HTTPError("404 Not Found")
+
+    resp_200 = MagicMock()
+    resp_200.status_code = 200
+    resp_200.json.return_value = {"resources": ["legacy-detect-001"]}
+
+    def side_effect_get(url, params=None, timeout=None):
+        if url.endswith("/alerts/queries/alerts/v1"):
+            return resp_404
+        return resp_200
+
+    with patch.object(client._session, "get", side_effect=side_effect_get):
+        result = client.get_detections()
+        assert result["resources"] == ["legacy-detect-001"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 20: CrowdStrikeClient.get_detection_details() succeeds and adapts schema
+# ─────────────────────────────────────────────────────────────────────────────
+def test_crowdstrike_get_detection_details_success(monkeypatch):
+    """get_detection_details() posts composite_ids and populates detection_id alias."""
+    for key, value in CROWDSTRIKE_ENV.items():
+        monkeypatch.setenv(key, value)
+    config = EDRConfig()
+    client = CrowdStrikeClient(config)
+    client._access_token = "mock-token"
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "resources": [
+            {"composite_id": "composite:001", "status": "new", "severity": 80}
+        ]
+    }
+
+    with patch.object(client._session, "post", return_value=mock_resp) as mock_post:
+        result = client.get_detection_details(["composite:001"])
+        mock_post.assert_called_once()
+        called_url = mock_post.call_args[0][0]
+        called_json = mock_post.call_args[1]["json"]
+        assert called_url.endswith("/alerts/entities/alerts/v2")
+        assert called_json == {"composite_ids": ["composite:001"]}
+
+        # Schema adaptation: composite_id and detection_id both present
+        assert result["resources"][0]["composite_id"] == "composite:001"
+        assert result["resources"][0]["detection_id"] == "composite:001"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 21: CrowdStrikeClient.get_detection_details() handles empty list input
+# ─────────────────────────────────────────────────────────────────────────────
+def test_crowdstrike_get_detection_details_empty_list(monkeypatch):
+    """get_detection_details([]) returns empty resources without sending network request."""
+    for key, value in CROWDSTRIKE_ENV.items():
+        monkeypatch.setenv(key, value)
+    config = EDRConfig()
+    client = CrowdStrikeClient(config)
+    client._access_token = "mock-token"
+
+    with patch.object(client._session, "post") as mock_post:
+        result = client.get_detection_details([])
+        assert result["resources"] == []
+        mock_post.assert_not_called()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 22: CrowdStrikeClient.get_detection_details() falls back to legacy on 404
+# ─────────────────────────────────────────────────────────────────────────────
+def test_crowdstrike_get_detection_details_fallback_on_404(monkeypatch):
+    """get_detection_details() falls back to legacy summaries if alerts v2 returns 404."""
+    for key, value in CROWDSTRIKE_ENV.items():
+        monkeypatch.setenv(key, value)
+    config = EDRConfig()
+    client = CrowdStrikeClient(config)
+    client._access_token = "mock-token"
+
+    resp_404 = MagicMock()
+    resp_404.status_code = 404
+    from requests.exceptions import HTTPError
+    resp_404.raise_for_status.side_effect = HTTPError("404 Not Found")
+
+    resp_200 = MagicMock()
+    resp_200.status_code = 200
+    resp_200.json.return_value = {
+        "resources": [{"detection_id": "legacy:001", "status": "new"}]
+    }
+
+    def side_effect_post(url, json=None, timeout=None):
+        if url.endswith("/alerts/entities/alerts/v2"):
+            return resp_404
+        return resp_200
+
+    with patch.object(client._session, "post", side_effect=side_effect_post):
+        result = client.get_detection_details(["legacy:001"])
+        assert result["resources"][0]["detection_id"] == "legacy:001"
+        assert result["resources"][0]["composite_id"] == "legacy:001"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 23: CrowdStrikeClient unified alias methods
+# ─────────────────────────────────────────────────────────────────────────────
+def test_crowdstrike_unified_aliases(monkeypatch):
+    """get_alerts() and get_alert_details() aliases match get_detections behavior."""
+    for key, value in CROWDSTRIKE_ENV.items():
+        monkeypatch.setenv(key, value)
+    config = EDRConfig()
+    client = CrowdStrikeClient(config)
+    client._access_token = "mock-token"
+
+    with patch.object(client, "get_detections", return_value={"resources": ["a1"]}) as mock_det:
+        res1 = client.get_alerts(limit=5)
+        assert res1["resources"] == ["a1"]
+        mock_det.assert_called_once_with(limit=5)
+
+    with patch.object(client, "get_detection_details", return_value={"resources": [{"composite_id": "a1"}]}) as mock_det_details:
+        res2 = client.get_alert_details(["a1"])
+        assert res2["resources"][0]["composite_id"] == "a1"
+        mock_det_details.assert_called_once_with(detection_ids=["a1"])

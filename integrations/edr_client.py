@@ -211,8 +211,18 @@ class CrowdStrikeClient(BaseEDRClient):
 
     PROVIDER = "crowdstrike"
     TOKEN_PATH = "/oauth2/token"
-    DETECTIONS_PATH = "/detects/queries/detects/v1"
-    DETECTION_DETAIL_PATH = "/detects/entities/summaries/GET/v1"
+
+    # Supported Falcon Alerts API endpoints (modern unified architecture)
+    ALERTS_PATH = "/alerts/queries/alerts/v1"
+    ALERT_DETAIL_PATH = "/alerts/entities/alerts/v2"
+
+    # Legacy Falcon Detections endpoints (for backward compatibility fallback)
+    LEGACY_DETECTIONS_PATH = "/detects/queries/detects/v1"
+    LEGACY_DETECTION_DETAIL_PATH = "/detects/entities/summaries/GET/v1"
+
+    # Backwards-compatible path aliases
+    DETECTIONS_PATH = ALERTS_PATH
+    DETECTION_DETAIL_PATH = ALERT_DETAIL_PATH
 
     def authenticate(self) -> None:
         token_url = self.config.api_base_url.rstrip("/") + self.TOKEN_PATH
@@ -248,12 +258,59 @@ class CrowdStrikeClient(BaseEDRClient):
     CONTAIN_ACTION_PATH = "/devices/entities/devices-actions/v2"
 
     def get_detections(self, limit: int = 10) -> dict:
-        logger.info("Fetching up to %d detection(s) from CrowdStrike.", limit)
-        return self._get(self.DETECTIONS_PATH, params={"limit": limit})
+        """
+        Queries CrowdStrike for detection/alert IDs.
+        Uses the modern Falcon Alerts API (/alerts/queries/alerts/v1) by default,
+        with automatic fallback to the legacy detects endpoint if 404 is encountered.
+        """
+        logger.info("Fetching up to %d detection(s)/alert(s) from CrowdStrike.", limit)
+        try:
+            return self._get(self.ALERTS_PATH, params={"limit": limit})
+        except EDRAPIError as exc:
+            if "404" in str(exc):
+                logger.info("Alerts endpoint returned 404; falling back to legacy detects query.")
+                return self._get(self.LEGACY_DETECTIONS_PATH, params={"limit": limit})
+            raise
+
+    def get_alerts(self, limit: int = 10) -> dict:
+        """Alias for get_detections providing unified method naming across EDR providers."""
+        return self.get_detections(limit=limit)
 
     def get_detection_details(self, detection_ids: list) -> dict:
-        logger.info("Fetching details for %d detection ID(s).", len(detection_ids))
-        return self._post(self.DETECTION_DETAIL_PATH, payload={"ids": detection_ids})
+        """
+        Fetches detailed entity records for the specified detection/alert IDs.
+        Uses the modern Falcon Alerts API (/alerts/entities/alerts/v2) with
+        'composite_ids' payload, and gracefully falls back to legacy summaries if needed.
+        Adapts response entities so both 'composite_id' and 'detection_id' are accessible.
+        """
+        if not detection_ids:
+            return {"meta": {"powered_by": "crowdstrike"}, "resources": [], "errors": []}
+
+        logger.info("Fetching details for %d detection/alert ID(s).", len(detection_ids))
+        try:
+            resp = self._post(self.ALERT_DETAIL_PATH, payload={"composite_ids": detection_ids})
+        except EDRAPIError as exc:
+            if "404" in str(exc):
+                logger.info("Alert details endpoint returned 404; falling back to legacy summaries.")
+                resp = self._post(self.LEGACY_DETECTION_DETAIL_PATH, payload={"ids": detection_ids})
+            else:
+                raise
+
+        # Adapt response schemas: ensure both composite_id and detection_id are present
+        resources = resp.get("resources", [])
+        if isinstance(resources, list):
+            for item in resources:
+                if isinstance(item, dict):
+                    if "composite_id" in item and "detection_id" not in item:
+                        item["detection_id"] = item["composite_id"]
+                    elif "detection_id" in item and "composite_id" not in item:
+                        item["composite_id"] = item["detection_id"]
+
+        return resp
+
+    def get_alert_details(self, alert_ids: list) -> dict:
+        """Alias for get_detection_details providing unified method naming across EDR providers."""
+        return self.get_detection_details(detection_ids=alert_ids)
 
     def isolate_endpoint(self, endpoint_id: str, comment: Optional[str] = None) -> dict:
         """
@@ -395,6 +452,7 @@ class SimulatedEDRClient:
             "resources": [
                 {
                     "detection_id": did,
+                    "composite_id": did,
                     "status": "new",
                     "severity": "High",
                     "behaviors": [{"tactic": "Execution", "technique": "T1059",
@@ -405,6 +463,10 @@ class SimulatedEDRClient:
             ],
             "errors": [],
         }
+
+    def get_alert_details(self, alert_ids: list) -> dict:
+        """Alias for get_detection_details providing unified method naming across providers."""
+        return self.get_detection_details(detection_ids=alert_ids)
 
     def get_alerts(self, top: int = 10) -> dict:
         logger.info("[SIMULATED] Returning %d simulated alert(s).", top)

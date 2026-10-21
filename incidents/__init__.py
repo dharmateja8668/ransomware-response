@@ -5,6 +5,7 @@ Provides data models, SQLite storage, and incident lifecycle management.
 """
 
 from incidents.models import (
+    IncidentAuditLogResponse,
     IncidentCreate,
     IncidentResponse,
     IncidentStatus,
@@ -14,12 +15,15 @@ from incidents.service import (
     IncidentDuplicateError,
     IncidentNotFoundError,
     create_incident,
+    get_audit_logs_for_alert,
     get_incident_by_alert_id,
     list_incidents,
+    record_audit_log,
     update_incident_status,
 )
 
 __all__ = [
+    "IncidentAuditLogResponse",
     "IncidentCreate",
     "IncidentResponse",
     "IncidentStatus",
@@ -27,7 +31,9 @@ __all__ = [
     "IncidentDuplicateError",
     "IncidentNotFoundError",
     "create_incident",
+    "get_audit_logs_for_alert",
     "get_incident_by_alert_id",
     "list_incidents",
+    "record_audit_log",
     "update_incident_status",
 ]

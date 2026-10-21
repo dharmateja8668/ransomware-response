@@ -5,15 +5,21 @@ Decoupled from HTTP routes and directly interacts with the SQLite database.
 """
 
 from datetime import datetime, timezone
+import json
+import logging
+import re
 import sqlite3
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from incidents.database import get_db, init_db
 from incidents.models import (
+    IncidentAuditLogResponse,
     IncidentCreate,
     IncidentResponse,
     IncidentStatus,
 )
+
+logger = logging.getLogger("orchestrator.audit")
 
 
 class IncidentDuplicateError(Exception):
@@ -187,3 +193,151 @@ def update_incident_status(
     if not record:
         raise IncidentNotFoundError(f"Incident with alert_id '{alert_id}' was not found.")
     return record
+
+
+_SENSITIVE_KEY_PATTERN = re.compile(
+    r"(secret|password|token|bearer|authorization|api[-_]?key|credential)",
+    re.IGNORECASE,
+)
+_BEARER_PATTERN = re.compile(r"Bearer\s+[A-Za-z0-9_\-\.]+", re.IGNORECASE)
+
+
+def sanitize_audit_data(val: Any) -> Any:
+    """
+    Recursively scrubs credentials, secrets, tokens, and authorization headers
+    from data before recording in logs or persistent audit storage.
+    """
+    if isinstance(val, dict):
+        sanitized = {}
+        for k, v in val.items():
+            if _SENSITIVE_KEY_PATTERN.search(str(k)):
+                sanitized[k] = "[REDACTED]"
+            else:
+                sanitized[k] = sanitize_audit_data(v)
+        return sanitized
+    elif isinstance(val, list):
+        return [sanitize_audit_data(item) for item in val]
+    elif isinstance(val, str):
+        # Scrub inline bearer tokens or auth headers
+        scrubbed = _BEARER_PATTERN.sub("Bearer [REDACTED]", val)
+        return scrubbed
+    return val
+
+
+def record_audit_log(
+    alert_id: str,
+    action: str,
+    execution_mode: str,
+    status: str,
+    incident_id: Optional[str] = None,
+    identity_provider: Optional[str] = None,
+    user_id: Optional[str] = None,
+    message: Optional[str] = None,
+    correlation_id: Optional[str] = None,
+    details: Optional[Dict[str, Any]] = None,
+    timestamp: Optional[str] = None,
+    db_path: Optional[str] = None,
+) -> IncidentAuditLogResponse:
+    """
+    Records an incident audit entry in the SQLite audit log table and emits a safe log line.
+    Enforces strict sanitization to guarantee credentials, access tokens, and secrets
+    are NEVER persisted or logged.
+    """
+    init_db(db_path)
+    now_iso = timestamp or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    clean_details = sanitize_audit_data(details) if details else None
+    clean_message = sanitize_audit_data(message) if message else None
+    details_json = json.dumps(clean_details) if clean_details is not None else None
+
+    # Safe log emission without secrets
+    logger.info(
+        "AUDIT: alert_id=%s, action=%s, mode=%s, status=%s, provider=%s, user=%s, action_id=%s",
+        alert_id,
+        action,
+        execution_mode,
+        status,
+        identity_provider or "N/A",
+        user_id or "N/A",
+        correlation_id or "N/A",
+    )
+
+    with get_db(db_path) as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO incident_audit_logs (
+                alert_id, incident_id, identity_provider, user_id,
+                action, execution_mode, status, message,
+                correlation_id, details, timestamp
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                alert_id,
+                incident_id or alert_id,
+                identity_provider,
+                user_id,
+                action,
+                execution_mode,
+                status,
+                clean_message,
+                correlation_id,
+                details_json,
+                now_iso,
+            ),
+        )
+        row_id = cursor.lastrowid
+
+    return IncidentAuditLogResponse(
+        id=row_id,
+        alert_id=alert_id,
+        incident_id=incident_id or alert_id,
+        identity_provider=identity_provider,
+        user_id=user_id,
+        action=action,
+        execution_mode=execution_mode,
+        status=status,
+        message=clean_message,
+        correlation_id=correlation_id,
+        details=clean_details,
+        timestamp=now_iso,
+    )
+
+
+def get_audit_logs_for_alert(
+    alert_id: str,
+    db_path: Optional[str] = None,
+) -> List[IncidentAuditLogResponse]:
+    """
+    Retrieves all audit logs recorded for a specific alert_id ordered chronologically.
+    """
+    init_db(db_path)
+    with get_db(db_path) as conn:
+        cursor = conn.execute(
+            "SELECT * FROM incident_audit_logs WHERE alert_id = ? ORDER BY id ASC",
+            (alert_id,),
+        )
+        rows = cursor.fetchall()
+        results: List[IncidentAuditLogResponse] = []
+        for r in rows:
+            details_dict = None
+            if r["details"]:
+                try:
+                    details_dict = json.loads(r["details"])
+                except Exception:
+                    details_dict = {"raw": r["details"]}
+            results.append(
+                IncidentAuditLogResponse(
+                    id=r["id"],
+                    alert_id=r["alert_id"],
+                    incident_id=r["incident_id"],
+                    identity_provider=r["identity_provider"],
+                    user_id=r["user_id"],
+                    action=r["action"],
+                    execution_mode=r["execution_mode"],
+                    status=r["status"],
+                    message=r["message"],
+                    correlation_id=r["correlation_id"],
+                    details=details_dict,
+                    timestamp=r["timestamp"],
+                )
+            )
+        return results

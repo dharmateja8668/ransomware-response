@@ -76,6 +76,25 @@ def init_db(db_path: Optional[str] = None) -> None:
 
     CREATE INDEX IF NOT EXISTS idx_incidents_status ON incidents (status);
     CREATE INDEX IF NOT EXISTS idx_incidents_severity ON incidents (severity);
+
+    CREATE TABLE IF NOT EXISTS incident_audit_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        alert_id TEXT NOT NULL,
+        incident_id TEXT,
+        identity_provider TEXT,
+        user_id TEXT,
+        action TEXT NOT NULL,
+        execution_mode TEXT NOT NULL,
+        status TEXT NOT NULL,
+        message TEXT,
+        correlation_id TEXT,
+        details TEXT,
+        timestamp TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_audit_alert_id ON incident_audit_logs (alert_id);
+    CREATE INDEX IF NOT EXISTS idx_audit_user_id ON incident_audit_logs (user_id);
+    CREATE INDEX IF NOT EXISTS idx_audit_action ON incident_audit_logs (action);
     """
     with get_db(db_path) as conn:
         conn.executescript(schema_sql)

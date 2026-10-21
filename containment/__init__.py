@@ -13,6 +13,18 @@ to determine whether automated network containment should be initiated for
 an affected endpoint.
 """
 
+from containment.identity_response import (
+    IdentityActionRegistry,
+    IdentityResponsePolicy,
+    clear_identity_registry,
+    evaluate_identity_policy,
+    execute_account_suspension,
+    execute_session_revocation,
+    extract_user_identifier,
+    get_identity_registry,
+    is_account_protected,
+    process_coordinated_response_workflow,
+)
 from containment.network_containment import (
     DECISION_CONTAINMENT_NOT_RECOMMENDED,
     DECISION_CONTAINMENT_RECOMMENDED,
@@ -69,4 +81,14 @@ __all__ = [
     "parse_edr_isolation_response",
     "process_containment_workflow",
     "validate_alert",
+    "IdentityActionRegistry",
+    "IdentityResponsePolicy",
+    "clear_identity_registry",
+    "evaluate_identity_policy",
+    "execute_account_suspension",
+    "execute_session_revocation",
+    "extract_user_identifier",
+    "get_identity_registry",
+    "is_account_protected",
+    "process_coordinated_response_workflow",
 ]

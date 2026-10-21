@@ -14,15 +14,17 @@ An automated incident response orchestration platform designed to intake endpoin
 7. [Network Containment Decision Logic (Week 2 Day 1)](#network-containment-decision-logic-week-2-day-1)
 8. [Week 2 Day 2 — EDR Integration and Network Isolation](#week-2-day-2--edr-integration-and-network-isolation)
 9. [Week 2 Day 3 — Containment Workflow Validation](#week-2-day-3--containment-workflow-validation)
-10. [API Endpoints](#api-endpoints)
-11. [Working with Incidents](#working-with-incidents)
-12. [Sending Test Alerts](#sending-test-alerts)
-13. [Duplicate Alert Handling (Idempotency)](#duplicate-alert-handling-idempotency)
-14. [Configuration & Environment Setup](#configuration--environment-setup)
-15. [Running the Application](#running-the-application)
-16. [Running the Test Suite](#running-the-test-suite)
-17. [Current Limitations](#current-limitations)
-18. [Security Best Practices](#security-best-practices)
+10. [Week 2 Day 4 — Identity Provider Integration and Account Suspension](#week-2-day-4--identity-provider-integration-and-account-suspension)
+11. [Week 2 Day 5 — Session Revocation and Coordinated Incident Response](#week-2-day-5--session-revocation-and-coordinated-incident-response)
+12. [API Endpoints](#api-endpoints)
+13. [Working with Incidents & Audit Trail](#working-with-incidents--audit-trail)
+14. [Sending Test Alerts](#sending-test-alerts)
+15. [Duplicate Alert Handling (Idempotency)](#duplicate-alert-handling-idempotency)
+16. [Configuration & Environment Setup](#configuration--environment-setup)
+17. [Running the Application](#running-the-application)
+18. [Running the Test Suite](#running-the-test-suite)
+19. [Current Limitations](#current-limitations)
+20. [Security Best Practices](#security-best-practices)
 
 ---
 
@@ -393,6 +395,152 @@ uvicorn main:app --host 127.0.0.1 --port 8000 --reload
 
 ---
 
+## Week 2 Day 4 — Identity Provider Integration and Account Suspension
+
+### Overview
+Week 2 Day 4 integrates an enterprise Identity Provider (IdP) into the incident response pipeline. When a security alert indicates a high-severity threat (such as ransomware execution or interactive hands-on-keyboard adversary intrusion), the orchestrator can resolve the associated human or service account and execute policy-governed account suspension.
+
+### Architecture & Supported Identity Providers
+The identity provider integration module (`integrations/identity_client.py`) provides a clean, decoupled abstraction:
+- **Microsoft Entra ID / Microsoft Graph API (`EntraIDClient`)**:
+  - Authenticates via OAuth 2.0 Client Credentials Grant against Azure AD token endpoint:
+    `POST https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token`
+    with scope `https://graph.microsoft.com/.default`.
+  - Performs directory user lookups and account updates via Microsoft Graph API v1.0.
+  - Disables user sign-in by submitting a PATCH request:
+    `PATCH https://graph.microsoft.com/v1.0/users/{user_id}` with payload `{"accountEnabled": false}`.
+    (Microsoft Graph returns `HTTP 204 No Content` upon successful modification).
+- **Simulated Identity Client (`SimulatedIdentityClient` / `MockIdentityClient`)**:
+  - Safe, local in-memory directory adapter for testing and development without live tenant credentials.
+  - Accurately models directory identities, status transitions, and failure injection modes (timeouts, authentication errors, authorization errors, malformed responses, and ambiguous identities).
+  - Makes zero outbound network calls and modifies no external user accounts.
+
+### User Resolution Hierarchy & Safety Rules
+The orchestrator safely resolves user accounts from incoming alert telemetry (`extract_user_identifier`):
+1. **Directory User ID (`directory_user_id` / `user_id`)**: Highest precedence; queries stable directory UUID (`/v1.0/users/{id}`).
+2. **User Principal Name (`user_principal_name` / `upn`)**: Direct directory lookup (`/v1.0/users/{upn}`).
+3. **Email Address (`email` / `mail`)**: Evaluates directory filter `mail eq '{email}' or userPrincipalName eq '{email}'`.
+4. **Username (`username`)**: Fallback search across directory attributes.
+5. **Ambiguous Identity Rejection**: If a search matches multiple directory accounts, the orchestrator raises `AmbiguousUserError` and rejects the action (`STATUS_REJECTED`) to avoid modifying unintended accounts.
+6. **Strict IP-Only Safety Rule**: Account suspension is **NEVER** executed based solely on an IP address or hostname. If no user telemetry is present in the alert, the action is rejected safely.
+
+### Account Protection Safeguards
+To prevent catastrophic automated lockouts, hard-coded and configurable safeguards are enforced before any account suspension:
+- **Emergency Administrator Accounts**: Protects break-glass accounts (e.g., `breakglass`, `emergency-admin`, `admin`, `root`).
+- **Orchestrator Service Account**: Shields the orchestrator's own service identity (e.g., `svc-orchestrator`, `orchestrator`) from suspending itself.
+- **Configurable Protected Accounts**: Environment variable `IDENTITY_PROTECTED_ACCOUNTS` defines additional protected accounts.
+- **Optional Test-Account Allowlist**: In authorized live test environments, `IDENTITY_TEST_ACCOUNT_ALLOWLIST` can restrict automated operations to permitted test accounts only.
+
+### Structured Account-Suspension Result Schema
+Adheres to the required Day 4 result specification:
+```json
+{
+  "alert_id": "ALERT-1001",
+  "user_id": "c0a80101-0002-0000-0000-000000000002",
+  "user_principal_name": "compromised.user@contoso.com",
+  "identity_provider": "entra_id",
+  "action": "SUSPEND_ACCOUNT",
+  "execution_mode": "dry_run",
+  "status": "SIMULATED",
+  "message": "Account suspension simulated; no account modified."
+}
+```
+
+---
+
+## Week 2 Day 5 — Session Revocation and Coordinated Incident Response
+
+### Overview
+Week 2 Day 5 extends the identity integration to support user session revocation and orchestrates all response actions—EDR network containment, IdP account suspension, and IdP session revocation—into a unified, coordinated incident response workflow with transactional SQLite state transitions and an immutable audit trail.
+
+### Session Revocation Architecture & Limitations
+- **Microsoft Graph API Operation**:
+  - `POST https://graph.microsoft.com/v1.0/users/{user_id}/revokeSignInSessions` with empty JSON body `{}`.
+  - Graph API returns `HTTP 200 OK` with payload `{"value": true}`.
+- **Required Microsoft Graph Permissions**:
+  - `User.RevokeSessions.All` or `Directory.ReadWrite.All`.
+- **Token Invalidation Scope & Limitations**:
+  - **Refresh Tokens & Browser Cookies**: Immediately invalidated across all devices upon successful session revocation.
+  - **Existing Access Tokens**: Standard OAuth 2.0 access tokens remain valid until their expiration window (typically 60 minutes) unless **Continuous Access Evaluation (CAE)** is enabled in the Microsoft Entra tenant.
+  - Session revocation is maintained as a separate, distinct action from account suspension.
+- **Unsupported Providers**: If an identity provider does not support session revocation, the orchestrator returns `STATUS_UNSUPPORTED` rather than falsely claiming success.
+
+### Coordinated Incident Response Workflow
+The multi-action orchestrator (`process_coordinated_response_workflow` / `POST /containment/coordinate`) coordinates remediation across endpoints and identities:
+
+```mermaid
+flowchart TD
+    A[Incoming Security Alert] --> B[Alert Validation & Telemetry Extraction]
+    B --> C[Evaluate EDR Containment Policy]
+    B --> D[Evaluate IdP Response Policy]
+    C --> E[EDR Endpoint Isolation]
+    D --> F[IdP Account Suspension]
+    D --> G[IdP Session Revocation]
+    E --> H[Aggregate Action Results]
+    F --> H
+    G --> H
+    H --> I[Determine Overall Workflow Status]
+    I --> J[Synchronize Incident Status in SQLite]
+    I --> K[Append Audit Trail Records]
+    K --> L[Return Structured Coordinated Response]
+```
+
+### Robust Partial-Success Handling
+The orchestrator explicitly tracks and returns individual outcomes for each action:
+- **Endpoint Isolation Succeeds, Identity Fails**: The endpoint is isolated and the incident transitions to `CONTAINED`. Identity failure is recorded; overall status is `PARTIAL_SUCCESS`.
+- **Identity Suspension Succeeds, EDR Isolation Fails**: Account is suspended, but the incident is **NOT** marked `CONTAINED` (it transitions to `INVESTIGATING`). Overall status is `PARTIAL_SUCCESS`.
+- **One Action Returns UNKNOWN or Times Out**: Uncertainty is preserved; the system never converts an API timeout or error into false success.
+- **No Automatic Reversal**: The system does not undo a successful endpoint containment if a subsequent identity call fails.
+
+### Structured Coordinated Response Schema
+Adheres to the required Day 5 result specification:
+```json
+{
+  "alert_id": "ALERT-1001",
+  "incident_id": "ALERT-1001",
+  "endpoint_containment": {
+    "status": "SIMULATED",
+    "action": "ISOLATE_ENDPOINT",
+    "endpoint_id": "EP-001",
+    "provider": "simulated",
+    "action_id": "sim-action-EP-001",
+    "message": "Dry run completed. No EDR request was sent."
+  },
+  "account_suspension": {
+    "status": "SIMULATED",
+    "action": "SUSPEND_ACCOUNT",
+    "user_id": "c0a80101-0002-0000-0000-000000000002",
+    "user_principal_name": "compromised.user@contoso.com",
+    "provider": "simulated",
+    "action_id": "sim-susp-c0a80101-0002-0000-0000-000000000002",
+    "message": "Account suspension simulated; no account modified."
+  },
+  "session_revocation": {
+    "status": "SIMULATED",
+    "action": "REVOKE_SESSIONS",
+    "user_id": "c0a80101-0002-0000-0000-000000000002",
+    "user_principal_name": "compromised.user@contoso.com",
+    "provider": "simulated",
+    "action_id": "sim-revoke-c0a80101-0002-0000-0000-000000000002",
+    "message": "User session revocation simulated; no real sessions revoked."
+  },
+  "overall_status": "SIMULATED",
+  "message": "Response workflow simulated; no real actions executed.",
+  "incident_status": "NEW"
+}
+```
+
+### Idempotency & Duplicate Suppression (IdentityActionRegistry)
+- **Cooldown Window**: Tracks user account actions in `IdentityActionRegistry` with a default 300-second cooldown.
+- **Duplicate Suppression**: Repeated requests for the same user within the window return prior status without contacting the IdP.
+- **Thread Safety**: Protected with process-local `threading.Lock`.
+
+### Audit Logging & Zero-Secret Guarantee
+- **Database Table (`incident_audit_logs`)**: Records `alert_id`, `incident_id`, `identity_provider`, `user_id`, `action`, `execution_mode`, `status`, `message`, `correlation_id`, `details`, and `timestamp`.
+- **Sanitization Engine (`sanitize_audit_data`)**: Automatically detects and redacts client secrets, passwords, bearer tokens, and authorization headers from logs and database records.
+
+---
+
 ## API Endpoints
 
 | Method | Endpoint | Description | Auth Required |
@@ -401,6 +549,10 @@ uvicorn main:app --host 127.0.0.1 --port 8000 --reload
 | `POST` | `/alert` | Baseline alert intake (backwards compatible) | No |
 | `POST` | `/webhook/edr` | Secure webhook endpoint for incoming EDR alerts | **Yes (`X-Webhook-Secret`)** |
 | `POST` | `/containment/isolate` | Week 2 Day 2: Network Containment & EDR Isolation | No (dry-run by default) |
+| `POST` | `/identity/suspend` | Week 2 Day 4: IdP User Account Suspension | No (dry-run by default) |
+| `POST` | `/identity/revoke-sessions` | Week 2 Day 5: IdP Sign-in Session Revocation | No (dry-run by default) |
+| `POST` | `/containment/coordinate` | Week 2 Day 5: Coordinated Incident Response (EDR + IdP) | No (dry-run by default) |
+| `GET` | `/incidents/{alert_id}/audit-logs`| Week 2 Day 5: Retrieve Audit Trail for an Alert | No |
 | `POST` | `/incidents` | Manually record an incident (`409 Conflict` on duplicate ID) | No |
 | `GET` | `/incidents` | List all incidents (with optional `status` & `severity` filters) | No |
 | `GET` | `/incidents/{alert_id}` | Retrieve single incident details (`404 Not Found` if missing) | No |
@@ -526,15 +678,23 @@ Execute the automated test suite using `pytest`:
 .\venv\Scripts\pytest.exe -v
 ```
 
-### Complete Test Coverage (114 Automated Tests):
+### Complete Test Coverage (206 Automated Tests Passing):
+- **Identity Provider Integration Tests (`tests/test_identity_client.py`) — 20 Tests**:
+  - Valid user lookup, user not found, ambiguous user handling, missing username/directory ID fallback, invalid alert validation, ineligible/disabled account handling, dry-run simulation mode, live execution disabled by default, credential validation, IdP authentication failure (401), authorization failure (403), API timeouts, server errors (500), malformed responses, successful mocked suspension, ambiguous result uncertainty, emergency administrator account protection, orchestrator service-account protection, and zero real account modification during tests.
+- **Session Revocation Tests (`tests/test_session_revocation.py`) — 11 Tests**:
+  - Dry-run session revocation, authorized mocked session revocation, live execution safety defaults, missing user ID handling, unsupported provider operation mapping (`STATUS_UNSUPPORTED`), auth failure (401), authz failure (403), API timeouts, server errors (500), malformed response parsing, and ambiguous revocation results.
+- **Coordinated Incident Response Workflow Tests (`tests/test_identity_response_workflow.py`) — 9 Tests**:
+  - Multi-action duplicate-request cooldown suppression, partial incident-response success handling, EDR failure with successful identity action, identity action failure with successful EDR containment, zero false success reporting, zero secret leakage in logs/audit records, accurate SQLite incident audit records, zero external network calls, and FastAPI coordinated containment endpoint integration.
+- **End-to-End Containment Workflow Tests (`tests/test_e2e_workflow.py`) — 18 Tests**:
+  - Critical ransomware and hands-on-keyboard alert containment, EDR isolation dispatch, duplicate suppression cooldown, and SQLite lifecycle synchronization.
+- **EDR Network Containment Integration Tests (`tests/test_network_containment_edr.py`) — 36 Tests**:
+  - CrowdStrike Falcon and Microsoft Defender for Endpoint isolation execution, pending/requested state tracking, and dry-run safety.
 - **Network Containment Decision Logic Tests (`tests/test_network_containment.py`) — 34 Tests**:
-  - Critical ransomware and hands-on-keyboard containment recommendations, disabled/enabled high-severity policies, medium/low thresholds, missing IDs/telemetry validation, invalid severity, empty payloads, malformed inputs, object/Pydantic support, dry-run safety, and safe audit logging.
+  - Policy rule evaluation, machine identification validation, severity normalization, and safe decision generation.
 - **Alert Parser Tests (`tests/test_alert_parser.py`) — 39 Tests**:
-  - Severity normalization, timestamp UTC standardizing, missing/blank field validation, telemetry sanitization, and ransomware tagging.
-- **End-to-End Workflow Tests (`tests/test_e2e_workflow.py`) — 2 Tests**:
-  - Full lifecycle integration: simulated alert -> webhook auth -> parse -> SQLite storage -> query -> filter -> status update -> idempotent retry -> rejection testing.
+  - Severity normalization, timestamp UTC standardizing, telemetry sanitization, and ransomware tagging heuristics.
 - **Incident Data Management Tests (`tests/test_incidents.py`) — 13 Tests**:
-  - CRUD operations, unique constraints, status updates, DB error handling, and test isolation.
+  - SQLite CRUD operations, unique constraints, status updates, and DB error handling.
 - **Webhook Integration Tests (`tests/test_webhook.py`) — 11 Tests**:
   - Auth header checks, bearer tokens, optional fields, docs access, and validation error responses.
 - **EDR Client Tests (`tests/test_edr_client.py`) — 15 Tests**:

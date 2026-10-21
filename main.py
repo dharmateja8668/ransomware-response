@@ -20,10 +20,12 @@ import secrets
 from typing import List, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from incidents.database import init_db
 from incidents.models import (
+    IncidentAuditLogResponse,
     IncidentCreate,
     IncidentResponse,
     IncidentStatus,
@@ -33,9 +35,15 @@ from incidents.service import (
     IncidentDuplicateError,
     IncidentNotFoundError,
     create_incident,
+    get_audit_logs_for_alert,
     get_incident_by_alert_id,
     list_incidents,
     update_incident_status,
+)
+from containment.identity_response import (
+    execute_account_suspension,
+    execute_session_revocation,
+    process_coordinated_response_workflow,
 )
 from containment.network_containment import execute_network_containment
 from integrations.alert_parser import AlertParsingError, parse_and_enrich_alert
@@ -85,6 +93,12 @@ app = FastAPI(
     version="0.5.0",
     lifespan=lifespan,
 )
+
+
+@app.get("/", include_in_schema=False)
+def root():
+    """Redirect root access directly to interactive Swagger API documentation."""
+    return RedirectResponse(url="/docs")
 
 
 @app.get("/health")
@@ -342,3 +356,61 @@ def trigger_network_containment_endpoint(
     Defaults to safe dry-run simulation mode.
     """
     return execute_network_containment(alert, dry_run=dry_run)
+
+
+# ── Week 2 Day 4 Identity Provider & Account Suspension Endpoint ─────────────
+
+
+@app.post("/identity/suspend", status_code=status.HTTP_200_OK)
+def trigger_account_suspension_endpoint(
+    alert: Alert,
+    dry_run: Optional[bool] = None,
+) -> dict:
+    """
+    Week 2 Day 4: Identity Provider Account Suspension Endpoint.
+    Evaluates alert telemetry, identifies target compromised user, applies
+    protection safeguards, and requests account suspension via configured IdP.
+    Defaults to safe dry-run simulation mode.
+    """
+    return execute_account_suspension(alert, dry_run=dry_run)
+
+
+# ── Week 2 Day 5 Session Revocation & Coordinated Response Endpoints ─────────
+
+
+@app.post("/identity/revoke-sessions", status_code=status.HTTP_200_OK)
+def trigger_session_revocation_endpoint(
+    alert: Alert,
+    dry_run: Optional[bool] = None,
+) -> dict:
+    """
+    Week 2 Day 5: User Sign-in Session Revocation Endpoint.
+    Evaluates alert telemetry, resolves target user, applies protection safeguards,
+    and invalidates active sign-in sessions via configured IdP (e.g. Entra ID Graph API).
+    Defaults to safe dry-run simulation mode.
+    """
+    return execute_session_revocation(alert, dry_run=dry_run)
+
+
+@app.post("/containment/coordinate", status_code=status.HTTP_200_OK)
+def trigger_coordinated_response_endpoint(
+    alert: Alert,
+    dry_run: Optional[bool] = None,
+) -> dict:
+    """
+    Week 2 Day 5: Coordinated Incident Response Orchestration Endpoint.
+    Orchestrates EDR network containment, IdP account suspension, IdP session
+    revocation, SQLite incident status progression, and granular audit logging.
+    Defaults to safe dry-run simulation mode.
+    """
+    return process_coordinated_response_workflow(alert, dry_run=dry_run)
+
+
+@app.get("/incidents/{alert_id}/audit-logs", response_model=List[IncidentAuditLogResponse], status_code=status.HTTP_200_OK)
+def get_incident_audit_logs_endpoint(alert_id: str) -> List[IncidentAuditLogResponse]:
+    """
+    Week 2 Day 5: Audit Log Retrieval Endpoint.
+    Retrieves the chronological audit trail of containment and identity actions
+    recorded for the given alert_id.
+    """
+    return get_audit_logs_for_alert(alert_id)

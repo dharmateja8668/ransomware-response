@@ -477,7 +477,7 @@ def execute_account_suspension(
     # 3. Extract user identification (safeguard: do NOT suspend based only on IP)
     user_identifier, id_type = extract_user_identifier(alert)
     if not user_identifier or id_type == "missing":
-        msg = "No user identification found in alert telemetry. Cannot suspend account based only on IP or hostname."
+        msg = "Missing user identification: No user identification found in alert telemetry. Cannot suspend account based only on IP or hostname."
         logger.warning("Account suspension rejected for alert_id=%s: %s", raw_alert_id, msg)
         res = IdentityActionResult(
             alert_id=raw_alert_id,
@@ -806,6 +806,31 @@ def execute_account_suspension(
             target_user_id,
             reason=reason or f"Automated containment for alert {raw_alert_id}",
         )
+    except UnsupportedOperationError as unsup_err:
+        msg = f"Account suspension is unsupported by provider '{provider_name}': {unsup_err}"
+        logger.warning("Account suspension unsupported for alert_id=%s: %s", raw_alert_id, msg)
+        res = IdentityActionResult(
+            alert_id=raw_alert_id,
+            user_id=target_user_id,
+            user_principal_name=target_upn,
+            identity_provider=provider_name,
+            action=ACTION_SUSPEND_ACCOUNT,
+            execution_mode=EXECUTION_MODE_LIVE,
+            status=STATUS_UNSUPPORTED,
+            message=msg,
+        ).to_dict()
+        if record_audit:
+            record_audit_log(
+                alert_id=raw_alert_id,
+                action=ACTION_SUSPEND_ACCOUNT,
+                execution_mode=EXECUTION_MODE_LIVE,
+                status=STATUS_UNSUPPORTED,
+                user_id=target_user_id,
+                message=msg,
+                identity_provider=provider_name,
+                db_path=db_path,
+            )
+        return res
     except IdentityAuthError as auth_err:
         msg = f"Identity provider authorization/authentication failed: {auth_err}"
         logger.error("Account suspension failed for alert_id=%s: %s", raw_alert_id, msg)
@@ -1038,7 +1063,7 @@ def execute_session_revocation(
     # 2. Extract user identifier
     user_identifier, id_type = extract_user_identifier(alert)
     if not user_identifier or id_type == "missing":
-        msg = "No user identification found in alert telemetry. Cannot revoke sessions based only on IP or hostname."
+        msg = "Missing user identification: No user identification found in alert telemetry. Cannot revoke sessions based only on IP or hostname."
         res = IdentityActionResult(
             alert_id=raw_alert_id,
             user_id=None,

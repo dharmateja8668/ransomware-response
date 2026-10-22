@@ -541,6 +541,98 @@ Adheres to the required Day 5 result specification:
 
 ---
 
+## Week 2 Day 6 — Sandbox Testing and Final Validation
+
+### Sandbox Architecture
+Week 2 Day 6 provides end-to-end sandbox validation of the complete incident response pipeline under safe, simulated, and read-only conditions:
+
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                   Sandbox Validation Pipeline                         │
+├─────────────────┬───────────────────┬──────────────────────────────────┤
+│ 1. Alert Intake │ 2. Decision Logic │ 3. Simulated Remediation        │
+│    • /webhook/edr│    • Containment   │    • EDR Host Isolation (dry)    │
+│    • Auth & Parse│      Policy Eval   │    • Account Suspension (dry)    │
+│    • Idempotency │    • Identity      │    • Session Revocation (dry)    │
+│      Suppression │      Safeguards    │    • Zero Destructive Actions    │
+├─────────────────┴───────────────────┴──────────────────────────────────┤
+│ 4. Coordination, Audit Trail & State Synchronization                  │
+│    • Partial-Success Resolution (PARTIAL_SUCCESS / CONFIRMED / FAILED) │
+│    • SQLite Incident Lifecycle Progression (NEW -> CONTAINED)          │
+│    • Immutable Audit Logging with Automatic Secret Scrubbing           │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+### Setup and Startup Commands
+Activate the Python virtual environment and start the Uvicorn application server:
+
+```powershell
+# Windows PowerShell
+.\venv\Scripts\Activate.ps1
+.\venv\Scripts\python.exe -m uvicorn main:app --reload --host 127.0.0.1 --port 8000
+```
+
+- **Interactive API Documentation (Swagger UI)**: `http://127.0.0.1:8000/docs`
+- **Alternative ReDoc Interface**: `http://127.0.0.1:8000/redoc`
+- **Application Health Check**: `http://127.0.0.1:8000/health`
+
+### Environment Configuration Requirements
+Sandbox testing relies on safe defaults configured in `.env` (derived from `.env.example`):
+- `EDR_EXECUTION_MODE=dry_run` & `EDR_DRY_RUN=true`: Prevents real host isolation requests.
+- `IDENTITY_EXECUTION_MODE=dry_run` & `IDENTITY_DRY_RUN=true`: Prevents real account modifications or session invalidations.
+- `IDENTITY_PROVIDER=mock`: Directs identity calls to the in-memory simulated provider.
+- `WEBHOOK_SECRET`: Secure shared secret verified with constant-time comparison (`secrets.compare_digest`).
+- `IDENTITY_PROTECTED_ACCOUNTS`: Prevents accidental actions against administrator and service accounts.
+
+### API Testing Instructions
+Test endpoints interactively using Swagger UI (`http://127.0.0.1:8000/docs`) or programmatically via PowerShell:
+
+```powershell
+# Health Check
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/health" -Method Get
+
+# Webhook Alert Ingestion (with constant-time auth header)
+$headers = @{ "X-Webhook-Secret" = "your-secure-webhook-secret-here"; "Content-Type" = "application/json" }
+$body = @{
+    alert_id    = "SYN-CRIT-001"
+    threat_type = "ransomware"
+    severity    = 5
+    description = "Critical simulated ransomware alert"
+    timestamp   = "2026-10-22T10:00:00Z"
+    hostname    = "FIN-WORKSTATION-01"
+    endpoint_id = "EP-SYN-001"
+    username    = "victim.user@contoso.com"
+} | ConvertTo-Json
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/webhook/edr" -Method Post -Headers $headers -Body $body
+
+# Retrieve Audit Trail
+Invoke-RestMethod -Uri "http://127.0.0.1:8000/incidents/SYN-CRIT-001/audit-logs" -Method Get
+```
+
+### Synthetic Ransomware Alert Scenarios
+The validation suite exercises 6 distinct synthetic alert scenarios:
+1. **Scenario A (Critical Ransomware Alert)**: High severity triggers recommendation and simulated EDR isolation.
+2. **Scenario B (Low-Severity Alert)**: Informational/low severity returns non-containment decision (`STATUS_NOT_RECOMMENDED`).
+3. **Scenario C (Malformed Alert)**: Missing required fields rejected safely with `HTTP 422 Unprocessable Entity`.
+4. **Scenario D (Missing Endpoint ID)**: Alert lacking hostname and machine identifier rejected safely without dispatching isolation.
+5. **Scenario E (Duplicate Alert)**: Duplicate webhook deliveries detected and idempotently acknowledged with `"status": "duplicate"`.
+6. **Scenario F (Missing or Ambiguous User)**: Safely rejects account actions when user telemetry is missing or resolves to multiple directory accounts.
+
+### Dry-Run Safety Behavior
+- **Default Inactive Execution**: All containment, suspension, and revocation modules default to `dry_run=True`.
+- **Zero Real Modifications**: Automated test fixtures and sandbox runs execute zero destructive operations against external platforms.
+- **Redaction by Design**: `sanitize_audit_data()` strips bearer tokens, passwords, and client secrets from logs and database records.
+
+### CrowdStrike Authentication & Read-Only API Results
+Read-only validation against the live CrowdStrike Falcon tenant confirmed:
+- **OAuth 2.0 Authentication**: Successfully acquired Bearer token from `/oauth2/token`.
+- **Modern Alerts API**: Successfully queried `/alerts/queries/alerts/v1` with zero errors.
+- **Device Records Query**: Successfully queried `/devices/queries/devices/v1`.
+- **Registered Sensor Endpoints**: Returned 0 endpoints. This is a valid tenant state representing a test tenant without active physical or virtual sensor agents installed.
+- **Simulated vs Live Isolation**: Successfully authenticating and querying read-only APIs does **not** grant or imply live endpoint isolation capability. Destructive containment remains strictly simulated.
+
+---
+
 ## API Endpoints
 
 | Method | Endpoint | Description | Auth Required |
@@ -678,7 +770,9 @@ Execute the automated test suite using `pytest`:
 .\venv\Scripts\pytest.exe -v
 ```
 
-### Complete Test Coverage (206 Automated Tests Passing):
+### Complete Test Coverage (245 Automated Tests Passing):
+- **Sandbox Validation & Error Handling Tests (`tests/test_day6_sandbox_validation.py`) — 29 Tests**:
+  - Read-only CrowdStrike OAuth authentication, modern Falcon Alerts query, device list empty-state handling, mocked 401/403/429/500 API errors, synthetic ransomware alert scenarios A through F, network containment dry-run simulation, duplicate containment protection, timeout resilience, user resolution and protected account safeguards, coordinated multi-action response scenarios 1 through 9, audit record persistence, credential scrubbing, and HTTP failure code verification.
 - **Identity Provider Integration Tests (`tests/test_identity_client.py`) — 20 Tests**:
   - Valid user lookup, user not found, ambiguous user handling, missing username/directory ID fallback, invalid alert validation, ineligible/disabled account handling, dry-run simulation mode, live execution disabled by default, credential validation, IdP authentication failure (401), authorization failure (403), API timeouts, server errors (500), malformed responses, successful mocked suspension, ambiguous result uncertainty, emergency administrator account protection, orchestrator service-account protection, and zero real account modification during tests.
 - **Session Revocation Tests (`tests/test_session_revocation.py`) — 11 Tests**:
@@ -697,8 +791,8 @@ Execute the automated test suite using `pytest`:
   - SQLite CRUD operations, unique constraints, status updates, and DB error handling.
 - **Webhook Integration Tests (`tests/test_webhook.py`) — 11 Tests**:
   - Auth header checks, bearer tokens, optional fields, docs access, and validation error responses.
-- **EDR Client Tests (`tests/test_edr_client.py`) — 15 Tests**:
-  - Config parsing, simulated client, OAuth error handling, and legacy endpoints.
+- **EDR Client Tests (`tests/test_edr_client.py`) — 25 Tests**:
+  - Config parsing, simulated client, OAuth error handling, legacy endpoints, modern Falcon Alerts API query and detail retrieval, device querying, and response schema normalization.
 
 ---
 

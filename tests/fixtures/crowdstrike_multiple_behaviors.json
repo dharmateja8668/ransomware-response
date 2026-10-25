@@ -1,0 +1,25 @@
+{
+  "detection_id": "cs-det-multi-beh-999",
+  "created_timestamp": "2026-10-18T14:00:00Z",
+  "severity_name": "High",
+  "device": {
+    "device_id": "aid-fin-server-002",
+    "hostname": "FIN-APP-02.corp.local",
+    "local_ip": "172.16.50.12"
+  },
+  "user": {
+    "username": "finadmin@corp.local"
+  },
+  "behaviors": [
+    {
+      "behavior_id": "b-recon-01",
+      "timestamp": "2026-10-18T13:58:00Z",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "behavior_id": "b-crypto-02",
+      "timestamp": "2026-10-18T14:00:00Z",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ]
+}

@@ -54,8 +54,8 @@ def isolated_db(tmp_path, monkeypatch):
 
 @pytest.fixture
 def client():
-    """Provides a TestClient for testing FastAPI endpoints."""
-    return TestClient(app)
+    """Provides a TestClient with authorized SecOps credentials for testing FastAPI endpoints."""
+    return TestClient(app, headers={"X-API-Key": "secops-admin-key-2026"})
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -1,0 +1,12 @@
+{
+  "id": "da-def-alert-777",
+  "title": "Ransomware behavior detected in file system",
+  "category": "Ransomware",
+  "severity": "High",
+  "alertCreationTime": "2026-10-18T15:30:00.000Z",
+  "computerDnsName": "DESKTOP-DEF-88.internal.contoso.com",
+  "machineId": "m-def-uuid-11223344",
+  "lastIpAddress": "192.168.10.105",
+  "actor": "compromised.admin@contoso.com",
+  "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+}

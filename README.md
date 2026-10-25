@@ -635,21 +635,21 @@ Read-only validation against the live CrowdStrike Falcon tenant confirmed:
 
 ## API Endpoints
 
-| Method | Endpoint | Description | Auth Required |
-|---|---|---|---|
-| `GET` | `/health` | Health-check endpoint verifying operational status | No |
-| `POST` | `/alert` | Baseline alert intake (backwards compatible) | No |
-| `POST` | `/webhook/edr` | Secure webhook endpoint for incoming EDR alerts | **Yes (`X-Webhook-Secret`)** |
-| `POST` | `/containment/isolate` | Week 2 Day 2: Network Containment & EDR Isolation | No (dry-run by default) |
-| `POST` | `/identity/suspend` | Week 2 Day 4: IdP User Account Suspension | No (dry-run by default) |
-| `POST` | `/identity/revoke-sessions` | Week 2 Day 5: IdP Sign-in Session Revocation | No (dry-run by default) |
-| `POST` | `/containment/coordinate` | Week 2 Day 5: Coordinated Incident Response (EDR + IdP) | No (dry-run by default) |
-| `GET` | `/incidents/{alert_id}/audit-logs`| Week 2 Day 5: Retrieve Audit Trail for an Alert | No |
-| `POST` | `/incidents` | Manually record an incident (`409 Conflict` on duplicate ID) | No |
-| `GET` | `/incidents` | List all incidents (with optional `status` & `severity` filters) | No |
-| `GET` | `/incidents/{alert_id}` | Retrieve single incident details (`404 Not Found` if missing) | No |
-| `PATCH` | `/incidents/{alert_id}/status` | Update lifecycle status (`NEW`, `INVESTIGATING`, `CONTAINED`, `RESOLVED`) | No |
-| `GET` | `/docs` | Interactive Swagger API documentation | No |
+| Method | Endpoint | Description | Auth Required | Required Permission |
+|---|---|---|---|---|
+| `GET` | `/health` | Health-check endpoint verifying operational status | No | Public |
+| `POST` | `/alert` | Baseline alert intake (backwards compatible) | No | Public |
+| `POST` | `/webhook/edr` | Secure webhook endpoint for incoming EDR alerts | **Yes (`X-Webhook-Secret`)** | Webhook Shared Secret |
+| `POST` | `/containment/isolate` | Network Containment & EDR Host Isolation | **Yes (`X-API-Key` / Bearer)** | `containment:execute` |
+| `POST` | `/identity/suspend` | IdP User Account Suspension | **Yes (`X-API-Key` / Bearer)** | `identity:suspend` |
+| `POST` | `/identity/revoke-sessions` | IdP User Sign-in Session Revocation | **Yes (`X-API-Key` / Bearer)** | `identity:revoke` |
+| `POST` | `/containment/coordinate` | Coordinated Incident Response (EDR + IdP) | **Yes (`X-API-Key` / Bearer)** | `containment:coordinate` |
+| `GET` | `/incidents/{alert_id}/audit-logs`| Retrieve Chronological Audit Trail for an Alert | No | Public |
+| `POST` | `/incidents` | Manually record an incident (`409 Conflict` on duplicate ID) | No | Public |
+| `GET` | `/incidents` | List all incidents (with optional `status` & `severity` filters) | No | Public |
+| `GET` | `/incidents/{alert_id}` | Retrieve single incident details (`404 Not Found` if missing) | No | Public |
+| `PATCH` | `/incidents/{alert_id}/status` | Update incident lifecycle status | **Yes (`X-API-Key` / Bearer)** | `incident:write` |
+| `GET` | `/docs` | Interactive Swagger API documentation | No | Public |
 
 ---
 
@@ -739,9 +739,11 @@ cp .env.example .env
 ```
 
 Key environment parameters:
+- `ORCHESTRATOR_API_KEY`: Primary API key for securing sensitive endpoints.
 - `WEBHOOK_SECRET`: Secret token for webhook verification.
 - `INCIDENTS_DB_PATH`: SQLite database file path (default: `incidents.db`).
 - `EDR_PROVIDER`: `crowdstrike` or `defender` (when using production EDR).
+- `EDR_EXECUTION_MODE`: `dry_run` (default) or `live`.
 
 ---
 
@@ -763,14 +765,55 @@ uvicorn main:app --reload --host 127.0.0.1 --port 8000
 
 ## Running the Test Suite
 
-Execute the automated test suite using `pytest`:
+The repository contains two test suites: the primary root test suite (validating the end-to-end orchestrator, API security, adapters, validators, and coordination) and the nested subproject test suite.
+
+Pytest discovery is cleanly decoupled via dedicated `pytest.ini` files with explicit `testpaths = tests` and `pythonpath = .` to prevent namespace collisions.
+
+### 1. Running the Primary Root Test Suite (350 Tests)
 
 ```powershell
 # Windows PowerShell
-.\venv\Scripts\pytest.exe -v
+.\venv\Scripts\python.exe -m pytest tests/ -v
 ```
 
-### Complete Test Coverage (245 Automated Tests Passing):
+### 2. Running the Nested Subproject Test Suite (21 Tests)
+
+```powershell
+# Windows PowerShell
+.\venv\Scripts\python.exe -m pytest ransomware-response-orchestrator/tests/ -v
+```
+
+### Complete Test Coverage Breakdown (350 Root Tests Passing):
+- **API Security & RBAC Authorization Tests (`tests/test_api_security.py`) — 19 Tests**:
+  - Rejection of unauthenticated requests across all 5 sensitive endpoints (`401 Unauthorized`).
+  - Rejection of invalid API keys, malformed JWTs, expired tokens, and invalid signatures (`401 Unauthorized`).
+  - Role-based access control enforcement (`403 Forbidden` on insufficient permissions).
+  - Primary API key and secondary key rotation verification.
+  - Scoped identity verification (`containment_specialist`, `soc_analyst`, `admin`).
+  - Verification that unauthorized/forbidden requests never invoke underlying EDR or IdP clients.
+  - Webhook authentication preservation (`POST /webhook/edr` with `X-Webhook-Secret`).
+  - Zero credential leakage in response bodies, error messages, or logs.
+- **Native EDR Alert Adapter Tests (`tests/test_edr_adapters.py`) — 12 Tests**:
+  - Native CrowdStrike Falcon detection payload parsing (`device.hostname`, `device.local_ip`, nested user, process hash).
+  - Deterministic multi-behavior hash extraction prioritizing latest techniques.
+  - Native Microsoft Defender alert payload parsing (`computerDnsName`, `lastIpAddress`, actor, process hash).
+  - Defender evidence collection extraction (`evidence[].sha256`, `userAccount` domain resolution).
+  - Backward compatibility with pre-normalized schema payloads.
+  - Missing field resiliency (missing hostname, IP, username, hash).
+  - Safe error handling for malformed or non-dictionary inputs.
+- **Indicator Validation Tests (`tests/test_validators.py`) — 64 Tests**:
+  - IPv4 address validation (RFC standard formats, rejection of invalid/CIDR/injection strings).
+  - IPv6 address validation (RFC standard formats, double colon rules, rejection of malformed addresses).
+  - Hostname syntax validation (RFC 1123, label length 1–63, total length 1–253, rejection of control chars, injection chars, and trailing dots).
+  - Process hash validation (SHA-256, SHA-1, MD5 hex validation and lowercase normalization).
+- **Persistent Duplicate Coordination Tests (`tests/test_persistent_coordination.py`) — 7 Tests**:
+  - Atomic database lock acquisition and completion in SQLite.
+  - Cooldown period enforcement and expiration.
+  - Multi-threaded worker race-condition prevention (exactly 1 worker succeeds on concurrent attempts).
+  - Cross-instance synchronization (multiple registries sharing the same SQLite DB).
+  - State preservation across application shutdowns and restarts.
+  - Automatic reclamation of stale `IN_PROGRESS` locks from crashed workers.
+  - Recording and telemetry inspection of failed action attempts.
 - **Sandbox Validation & Error Handling Tests (`tests/test_day6_sandbox_validation.py`) — 29 Tests**:
   - Read-only CrowdStrike OAuth authentication, modern Falcon Alerts query, device list empty-state handling, mocked 401/403/429/500 API errors, synthetic ransomware alert scenarios A through F, network containment dry-run simulation, duplicate containment protection, timeout resilience, user resolution and protected account safeguards, coordinated multi-action response scenarios 1 through 9, audit record persistence, credential scrubbing, and HTTP failure code verification.
 - **Identity Provider Integration Tests (`tests/test_identity_client.py`) — 20 Tests**:
@@ -796,18 +839,111 @@ Execute the automated test suite using `pytest`:
 
 ---
 
+## Centralized Authentication & RBAC Authorization Architecture
+
+Sensitive endpoints that trigger active containment or mutate incident state are protected by centralized authentication and role-based access control (`security/auth.py`):
+
+### Protected Endpoints & Required Permissions
+- `POST /containment/isolate` : Requires `containment:execute`
+- `POST /identity/suspend` : Requires `identity:suspend`
+- `POST /identity/revoke-sessions` : Requires `identity:revoke`
+- `POST /containment/coordinate` : Requires `containment:coordinate`
+- `PATCH /incidents/{alert_id}/status` : Requires `incident:write`
+
+### Authentication Mechanisms
+1. **API Key Authentication**:
+   - Provide via header: `X-API-Key: <key>` or `Authorization: Bearer <key>`.
+   - Verified in constant time using `secrets.compare_digest` to prevent timing attacks.
+   - Primary key configured via `ORCHESTRATOR_API_KEY`.
+   - Secondary key configured via `ORCHESTRATOR_API_KEY_SECONDARY` for zero-downtime key rotation.
+   - Granular multi-key identity mapping configured via `ORCHESTRATOR_API_KEYS` (JSON mapping keys to principal IDs and roles).
+2. **Validated HMAC-SHA256 JWT Authentication**:
+   - Bearer tokens with format `header.payload.signature`.
+   - Strictly enforces HS256 algorithm (rejects `none` algorithm attack).
+   - Validates cryptographic signature against `JWT_SECRET_KEY` using constant-time comparison.
+   - Validates `exp` expiration claim, `iss` issuer, and `aud` audience claims.
+   - Extracts subject principal (`sub`), roles, and permissions claims.
+3. **Role-Based Access Control (RBAC)**:
+   - `admin`: Full administrative access (`*`).
+   - `secops_responder`: All incident management, containment execution, and identity response actions.
+   - `containment_specialist`: Read access and EDR host isolation (`containment:execute`).
+   - `identity_specialist`: Read access, account suspension, and session revocation.
+   - `soc_analyst`: Read-only access to incidents and audit logs (`incident:read`).
+
+---
+
+## Native EDR Alert Adapters (CrowdStrike & Microsoft Defender)
+
+The `integrations/adapters.py` module normalizes native alert payloads into the orchestrator's standardized schema via `adapt_raw_alert()`:
+
+### CrowdStrike Falcon Adapter (`CrowdStrikeAlertAdapter`)
+- Extracts alert ID from `detection_id`, `composite_id`, or `DetectId`.
+- Resolves hostname from `device.hostname` or `device.computer_name`.
+- Resolves local/external IP from `device.local_ip` or `device.external_ip`.
+- Resolves target user from `user_name`, `user.username`, or `behaviors[].user_name`.
+- Resolves process hash using a deterministic extraction strategy: inspects `behaviors` in reverse order (most recent first), prioritizing SHA-256 before falling back to MD5.
+- Normalizes Falcon 1–100 scores and text severity labels into standard 1–5 integers.
+
+### Microsoft Defender for Endpoint Adapter (`DefenderAlertAdapter`)
+- Extracts alert ID from `id`, `alertId`, or `incidentId`.
+- Resolves hostname from `computerDnsName` or `deviceName`.
+- Resolves IP from `lastIpAddress` or `ipAddress`.
+- Resolves user from `actor` or `userAccount` (combining `domainName\\accountName` if domain present).
+- Extracts process hash from top-level `sha256` or nested `evidence[].sha256`.
+- Normalizes severity (`Informational` -> 1, `Low` -> 2, `Medium` -> 3, `High` -> 4).
+
+---
+
+## Indicator Validation Engine
+
+All extracted indicators undergo structural validation via `integrations/validators.py`:
+- **IP Address Validation (`validate_ip_address`)**: Validates IPv4 and IPv6 syntax using Python's standard `ipaddress` library. Rejects CIDR notations, non-IP strings, and injection attempts.
+- **Hostname Validation (`validate_hostname`)**: Strictly enforces RFC 1123 DNS hostname syntax. Requires 1–253 total characters, 1–63 character dot-separated labels, alphanumeric characters with internal hyphens, and rejects command injection symbols (`;`, `|`, `&`, `$`, `` ` ``), control characters, and trailing dots.
+- **Process Hash Validation (`validate_process_hash`)**: Verifies hexadecimal characters and standard lengths for SHA-256 (64 hex), SHA-1 (40 hex), and MD5 (32 hex). Normalizes valid hashes to lowercase. Invalid indicators are safely dropped rather than used to target live endpoints.
+
+---
+
+## Persistent Multi-Worker Duplicate Coordination
+
+To prevent race conditions across multi-worker Uvicorn or container deployments:
+- **Database Persistence**: State is persisted in SQLite table `action_deduplication`.
+- **Database-Level Atomic Locks**: Leverages the `action_key` PRIMARY KEY unique constraint. When multiple workers concurrently attempt to isolate the same endpoint, SQLite engine-level atomicity guarantees that exactly one worker succeeds on INSERT, while others encounter `sqlite3.IntegrityError` and abort.
+- **Atomic Stale Lock Recovery**: Uses atomic conditional SQL updates (`UPDATE action_deduplication ... WHERE action_key = ? AND expires_at < ?`). If a worker crashes while an action is `IN_PROGRESS`, subsequent workers reclaim the lock safely after the timeout window.
+- **Cooldown Enforcement**: Completed actions enforce a configurable cooldown window (`ACTION_COOLDOWN_SECONDS`, default 300s) to suppress redundant actions.
+
+---
+
+## Safety Guidelines & Production EDR Configuration
+
+### CrowdStrike Falcon Safety
+1. **Default Dry-Run Mode**: `EDR_EXECUTION_MODE=dry_run` and `EDR_DRY_RUN=true` are active by default. In dry-run mode, containment logic executes and produces telemetry, but NO real API requests are dispatched to CrowdStrike.
+2. **Workstation Safeguard**: Your primary registered workstation (`DHARMATEJA`, AID: `57f9317c6e8f4b3dac65e8097a1f0db4`) must NEVER be isolated during testing.
+3. **Live State-Changing Isolation**: Live isolation must ONLY be tested in a dedicated non-production lab with a dedicated sacrificial VM, with explicit human approval, and with `dry_run=False`.
+4. **Interpreting Statuses**:
+   - `SIMULATED`: Dry-run mode active. No EDR call was made.
+   - `REQUESTED`: Live isolation call dispatched and acknowledged by EDR API, awaiting agent check-in.
+   - `CONFIRMED`: Live isolation verified on the endpoint.
+
+### Microsoft Entra ID Safety
+1. **Default Dry-Run Mode**: `IDENTITY_EXECUTION_MODE=dry_run` and `IDENTITY_DRY_RUN=true` are active by default.
+2. **Protected Account Safeguards**: `IDENTITY_PROTECTED_ACCOUNTS` prevents automated suspension or session revocation for emergency administrators, break-glass accounts, and orchestrator service principals.
+3. **Test Account Allowlist**: In live test environments, use `IDENTITY_TEST_ACCOUNT_ALLOWLIST` to restrict modifications exclusively to designated lab test accounts.
+
+---
+
 ## Current Limitations
 
-> **Prototype Notice:** This project is a simulated incident response orchestrator designed for development and educational demonstration.
-- **Single-Node SQLite Storage:** Uses a single local SQLite database file. Production deployments would utilize a distributed relational database (e.g., PostgreSQL).
-- **Simulated Containment:** Destructive actions (network host isolation, account termination, process killing) are mocked for safety.
-- **In-Process Tasks:** Task execution runs in-process rather than via distributed message brokers (e.g., Celery, RabbitMQ).
+> **Architecture Notice:** This system is an automated incident response orchestrator designed for SecOps workflows.
+- **Local SQLite Engine**: Uses SQLite with WAL mode and atomic transactions. For hyperscale enterprise deployments across Kubernetes clusters, migrate to PostgreSQL.
+- **Synchronous In-Process Execution**: Tasks execute within the FastAPI process. For high-volume environments, pair with Celery or Redis queue workers.
+- **API Secret Rotation**: Supports primary and secondary keys in environment configuration; enterprise deployments should integrate with HashiCorp Vault or Azure Key Vault.
 
 ---
 
 ## Security Best Practices
 
-1. **Constant-Time Verification**: Uses `secrets.compare_digest` to prevent timing attacks on shared secrets.
-2. **Zero-Log Exposure**: Credentials, auth headers, and secrets are strictly excluded from logs.
-3. **Parameterized SQL Queries**: All SQLite interactions utilize parameterized statements (`?`) to prevent SQL injection.
-4. **Environment Isolation**: Secrets and credentials are kept out of Git via `.gitignore`.
+1. **Authentication & Authorization**: Always configure `ORCHESTRATOR_API_KEY` or JWT tokens. Never expose sensitive endpoints without authorization.
+2. **Constant-Time Verification**: Uses `secrets.compare_digest` for all webhook and API key comparisons.
+3. **Zero-Log Exposure**: Credentials, auth headers, and secrets are strictly excluded from logs.
+4. **Parameterized SQL Queries**: All SQLite interactions utilize parameterized statements (`?`) to prevent SQL injection.
+5. **Environment Isolation**: Secrets and credentials are kept out of Git via `.gitignore`.

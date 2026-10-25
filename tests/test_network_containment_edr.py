@@ -585,8 +585,8 @@ def test_fastapi_containment_endpoint_and_db_progression():
     )
     create_incident(incident_in)
 
-    # 2. Call endpoint via TestClient in dry-run mode
-    test_client = TestClient(app)
+    # 2. Call endpoint via TestClient in dry-run mode with authorized SecOps credentials
+    test_client = TestClient(app, headers={"X-API-Key": "secops-admin-key-2026"})
     alert_payload = {
         "alert_id": "ALERT-E2E-CONTAIN-001",
         "threat_type": "ransomware",

@@ -4,12 +4,26 @@ EDR integration package for the Automated Ransomware Containment &
 Incident Response Orchestrator.
 """
 
+from integrations.adapters import (
+    BaseAlertAdapter,
+    CrowdStrikeAlertAdapter,
+    DefenderAlertAdapter,
+    adapt_raw_alert,
+)
 from integrations.alert_parser import (
     AlertParsingError,
     ParsedAlert,
     normalize_severity,
     normalize_timestamp,
     parse_and_enrich_alert,
+)
+from integrations.validators import (
+    is_valid_hostname,
+    is_valid_ip,
+    is_valid_process_hash,
+    validate_hostname,
+    validate_ip_address,
+    validate_process_hash,
 )
 from integrations.edr_client import (
     BaseEDRClient,

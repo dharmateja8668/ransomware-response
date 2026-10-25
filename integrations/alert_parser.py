@@ -126,23 +126,20 @@ def normalize_timestamp(timestamp_str: str) -> str:
     raise AlertParsingError(f"Timestamp '{timestamp_str}' cannot be parsed into a valid ISO 8601 timestamp.")
 
 
+from integrations.adapters import adapt_raw_alert
+from integrations.validators import (
+    validate_hostname,
+    validate_ip_address,
+    validate_process_hash,
+)
+
+
 def _clean_optional_string(val: Optional[Any]) -> Optional[str]:
     """Cleans optional string attributes; empty strings or whitespace become None."""
     if val is None:
         return None
     s = str(val).strip()
     return s if s else None
-
-
-def _clean_hash(val: Optional[Any]) -> Optional[str]:
-    """Cleans process/file hash, standardizing to lowercase if alphanumeric."""
-    h = _clean_optional_string(val)
-    if not h:
-        return None
-    # Normalize alphanumeric hashes (MD5, SHA1, SHA256) to lowercase
-    if re.fullmatch(r"[A-Fa-f0-9]+", h):
-        return h.lower()
-    return h
 
 
 @dataclass
@@ -181,9 +178,13 @@ class ParsedAlert:
         }
 
 
+NormalizedAlert = ParsedAlert
+
+
 def parse_and_enrich_alert(raw_data: Union[Dict[str, Any], Any]) -> ParsedAlert:
     """
     Parses, validates, normalizes, and enriches an incoming alert dictionary or object.
+    Supports both standard internal schema and raw native CrowdStrike & Defender payloads.
 
     Parameters:
       raw_data: Dictionary or object with alert fields.
@@ -205,6 +206,9 @@ def parse_and_enrich_alert(raw_data: Union[Dict[str, Any], Any]) -> ParsedAlert:
             raise AlertParsingError("Alert payload must be a dictionary or structured object.")
     else:
         data = dict(raw_data)
+
+    # 0. Apply native provider adapters if raw CrowdStrike or Defender schema detected
+    data = adapt_raw_alert(data)
 
     # 1. Validate required fields
     required_fields = ["alert_id", "threat_type", "severity", "description", "timestamp"]
@@ -229,12 +233,13 @@ def parse_and_enrich_alert(raw_data: Union[Dict[str, Any], Any]) -> ParsedAlert:
     norm_severity = normalize_severity(data["severity"])
     norm_timestamp = normalize_timestamp(str(data["timestamp"]))
 
-    # 4. Clean optional telemetry fields
-    hostname = _clean_optional_string(data.get("hostname"))
+    # 4. Clean and strictly validate optional telemetry indicators
+    # Invalid IP, hostname, or hash strings are safely discarded to prevent targeting errors
+    hostname = validate_hostname(data.get("hostname"))
     endpoint_id = _clean_optional_string(data.get("endpoint_id"))
-    ip_address = _clean_optional_string(data.get("ip_address"))
+    ip_address = validate_ip_address(data.get("ip_address"))
     username = _clean_optional_string(data.get("username"))
-    process_hash = _clean_hash(data.get("process_hash"))
+    process_hash = validate_process_hash(data.get("process_hash"))
 
     # 5. Enrichment derivations (safe, no external calls)
     severity_label = SEVERITY_LABEL_MAP.get(norm_severity, "UNKNOWN")

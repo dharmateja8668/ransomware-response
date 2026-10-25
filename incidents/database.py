@@ -95,6 +95,23 @@ def init_db(db_path: Optional[str] = None) -> None:
     CREATE INDEX IF NOT EXISTS idx_audit_alert_id ON incident_audit_logs (alert_id);
     CREATE INDEX IF NOT EXISTS idx_audit_user_id ON incident_audit_logs (user_id);
     CREATE INDEX IF NOT EXISTS idx_audit_action ON incident_audit_logs (action);
+
+    CREATE TABLE IF NOT EXISTS action_deduplication (
+        action_key TEXT PRIMARY KEY,
+        action_type TEXT NOT NULL,
+        target_id TEXT NOT NULL,
+        alert_id TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        status TEXT NOT NULL,
+        action_id TEXT,
+        initiated_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        details TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_action_dedup_target ON action_deduplication (target_id, action_type);
+    CREATE INDEX IF NOT EXISTS idx_action_dedup_expires ON action_deduplication (expires_at);
     """
     with get_db(db_path) as conn:
         conn.executescript(schema_sql)

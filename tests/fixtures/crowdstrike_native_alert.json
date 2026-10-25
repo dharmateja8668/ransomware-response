@@ -1,0 +1,27 @@
+{
+  "composite_id": "cs:det:1234567890:987654321",
+  "detection_id": "det-crowdstrike-987654321",
+  "created_timestamp": "2026-10-18T12:34:56.789Z",
+  "status": "new",
+  "max_severity_displayname": "Critical",
+  "max_severity": 90,
+  "device": {
+    "device_id": "cs-aid-57f9317c6e8f4b3dac65e8097a1f0db4",
+    "hostname": "WORKSTATION-SEC-01",
+    "local_ip": "10.100.4.52",
+    "external_ip": "203.0.113.195",
+    "os_version": "Windows 11 Enterprise"
+  },
+  "user_name": "victim.user@enterprise.internal",
+  "behaviors": [
+    {
+      "behavior_id": "beh-001",
+      "timestamp": "2026-10-18T12:34:50Z",
+      "tactic": "Impact",
+      "technique": "Data Encrypted for Impact",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "cmdline": "C:\\Windows\\Temp\\ransom_payload.exe --encrypt-shares",
+      "user_name": "victim.user@enterprise.internal"
+    }
+  ]
+}

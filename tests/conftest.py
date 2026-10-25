@@ -17,5 +17,10 @@ def isolated_test_db(tmp_path, monkeypatch):
     """
     db_file = str(tmp_path / "test_isolated.db")
     monkeypatch.setenv("INCIDENTS_DB_PATH", db_file)
+    monkeypatch.setenv("ORCHESTRATOR_API_KEY", "secops-admin-key-2026")
+    monkeypatch.setenv("EDR_EXECUTION_MODE", "dry_run")
+    monkeypatch.setenv("EDR_DRY_RUN", "true")
+    monkeypatch.setenv("IDENTITY_EXECUTION_MODE", "dry_run")
+    monkeypatch.setenv("IDENTITY_DRY_RUN", "true")
     init_db(db_file)
     yield db_file

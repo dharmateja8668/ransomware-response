@@ -80,7 +80,7 @@ def isolated_workflow_test_env(tmp_path, monkeypatch):
 
 @pytest.fixture
 def workflow_client():
-    return TestClient(app)
+    return TestClient(app, headers={"X-API-Key": "secops-admin-key-2026"})
 
 
 # ─────────────────────────────────────────────────────────────────────────────

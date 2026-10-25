@@ -615,25 +615,40 @@ def evaluate_containment(
     return decision_dict
 
 
+from incidents.coordination import (
+    ACTION_TYPE_CONTAINMENT,
+    get_dedup_store,
+)
+
+
 class ContainmentRegistry:
     """
-    Thread-safe registry tracking containment actions to prevent redundant or duplicate
-    isolation requests from being sent to the EDR platform.
+    Database-backed, thread-safe, and multi-process safe registry tracking containment actions
+    to prevent redundant or duplicate isolation requests from being sent to the EDR platform.
 
-    LIMITATIONS & ARCHITECTURE:
-      - This registry is an in-memory, process-local store protected by a threading lock.
-      - It reliably protects against concurrent duplicate requests within a single runtime process.
-      - It does NOT persist state across application restarts or synchronize across multiple
-        horizontal worker processes without an external distributed store (such as Redis).
+    ARCHITECTURE & CONCURRENCY:
+      - Primary storage is backed by SQLite (action_deduplication table) with atomic transactions.
+      - Guarantees coordination across multiple Uvicorn/FastAPI worker processes.
+      - Automatically recovers stale in-progress locks from crashed workers.
+      - Maintains in-memory cache mirror for ultra-fast local lookups.
     """
 
-    def __init__(self, cooldown_seconds: int = 300) -> None:
+    def __init__(self, cooldown_seconds: int = 300, db_path: Optional[str] = None) -> None:
         self.cooldown_seconds = cooldown_seconds
+        self.db_path = db_path
         self._records: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.Lock()
 
     def is_contained(self, endpoint_id: str) -> bool:
         """Checks whether the endpoint has an active or recent containment record within cooldown."""
+        # 1. Check persistent database-backed coordination
+        try:
+            if get_dedup_store(self.db_path).is_action_active(ACTION_TYPE_CONTAINMENT, endpoint_id):
+                return True
+        except Exception as exc:
+            logger.warning("Error querying persistent dedup store for is_contained(%s): %s", endpoint_id, exc)
+
+        # 2. In-memory fallback
         with self._lock:
             rec = self._records.get(endpoint_id)
             if not rec:
@@ -648,6 +663,19 @@ class ContainmentRegistry:
 
     def get_record(self, endpoint_id: str) -> Optional[Dict[str, Any]]:
         """Retrieves the latest containment record for an endpoint."""
+        try:
+            db_rec = get_dedup_store(self.db_path).get_action_record(ACTION_TYPE_CONTAINMENT, endpoint_id)
+            if db_rec:
+                return {
+                    "alert_id": db_rec.get("alert_id"),
+                    "provider": db_rec.get("provider"),
+                    "status": db_rec.get("status"),
+                    "action_id": db_rec.get("action_id"),
+                    "time": datetime.fromisoformat(db_rec["updated_at"]) if "updated_at" in db_rec else datetime.now(timezone.utc),
+                }
+        except Exception as exc:
+            logger.warning("Error reading from db_rec for endpoint %s: %s", endpoint_id, exc)
+
         with self._lock:
             return dict(self._records[endpoint_id]) if endpoint_id in self._records else None
 
@@ -659,7 +687,18 @@ class ContainmentRegistry:
         status: str,
         action_id: Optional[str] = None,
     ) -> None:
-        """Stores a containment action record."""
+        """Stores a containment action record in persistent database and memory cache."""
+        try:
+            get_dedup_store(self.db_path).complete_action(
+                action_type=ACTION_TYPE_CONTAINMENT,
+                target_id=endpoint_id,
+                status=status,
+                action_id=action_id,
+                cooldown_seconds=self.cooldown_seconds,
+            )
+        except Exception as exc:
+            logger.warning("Error updating persistent dedup store: %s", exc)
+
         with self._lock:
             self._records[endpoint_id] = {
                 "alert_id": alert_id,
@@ -671,13 +710,59 @@ class ContainmentRegistry:
 
     def release(self, endpoint_id: str) -> bool:
         """Removes an endpoint record from the registry (e.g. upon uncontainment)."""
+        db_released = False
+        try:
+            db_released = get_dedup_store(self.db_path).release_action(ACTION_TYPE_CONTAINMENT, endpoint_id)
+        except Exception as exc:
+            logger.warning("Error releasing from persistent dedup store: %s", exc)
+
         with self._lock:
-            return bool(self._records.pop(endpoint_id, None))
+            mem_released = bool(self._records.pop(endpoint_id, None))
+        return db_released or mem_released
 
     def clear(self) -> None:
-        """Clears all stored containment records."""
+        """Clears all stored containment records across database and memory."""
+        try:
+            get_dedup_store(self.db_path).clear()
+        except Exception as exc:
+            logger.warning("Error clearing persistent dedup store: %s", exc)
+
         with self._lock:
             self._records.clear()
+
+    def is_duplicate(self, target: str) -> bool:
+        """Alias for is_contained for standardized duplicate checking."""
+        return self.is_contained(target)
+
+    def record_containment(
+        self,
+        target: str,
+        alert_id: str,
+        status: str,
+        provider: str = "falcon",
+        action_id: Optional[str] = None,
+        telemetry: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Convenience alias for record()."""
+        self.record(
+            endpoint_id=target,
+            alert_id=alert_id,
+            provider=provider,
+            status=status,
+            action_id=action_id,
+        )
+
+    def get_duplicate_response(self, target: str) -> Optional[Dict[str, Any]]:
+        """Returns standard duplicate response dictionary for an active target."""
+        rec = self.get_record(target)
+        if not rec:
+            return None
+        return {
+            "status": "duplicate",
+            "original_status": rec.get("status"),
+            "target": target,
+            "alert_id": rec.get("alert_id"),
+        }
 
 
 _GLOBAL_CONTAINMENT_REGISTRY = ContainmentRegistry()

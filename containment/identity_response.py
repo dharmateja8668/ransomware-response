@@ -148,22 +148,48 @@ class IdentityResponsePolicy:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+from incidents.coordination import (
+    ACTION_TYPE_ACCOUNT_SUSPENSION,
+    ACTION_TYPE_SESSION_REVOCATION,
+    get_dedup_store,
+)
+
+
 class IdentityActionRegistry:
     """
-    Thread-safe in-memory registry tracking recent identity-response actions to prevent
-    redundant or duplicate account suspension and session revocation requests.
+    Database-backed, thread-safe, and multi-process safe registry tracking recent
+    identity-response actions to prevent redundant or duplicate account suspension
+    and session revocation requests across worker processes.
     """
 
-    def __init__(self, cooldown_seconds: int = 300) -> None:
+    def __init__(self, cooldown_seconds: int = 300, db_path: Optional[str] = None) -> None:
         self.cooldown_seconds = cooldown_seconds
+        self.db_path = db_path
         self._records: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.Lock()
 
     def _key(self, user_id: str, action: str) -> str:
         return f"{user_id.strip().lower()}::{action.strip().upper()}"
 
+    def _normalize_action_type(self, action: str) -> str:
+        act = action.strip().upper()
+        if act == ACTION_SUSPEND_ACCOUNT:
+            return ACTION_TYPE_ACCOUNT_SUSPENSION
+        elif act == ACTION_REVOKE_SESSIONS:
+            return ACTION_TYPE_SESSION_REVOCATION
+        return act.lower()
+
     def is_action_active(self, user_id: str, action: str) -> bool:
         """Checks if a confirmed or requested action was executed within the cooldown window."""
+        action_type = self._normalize_action_type(action)
+        # 1. Check persistent database-backed coordination
+        try:
+            if get_dedup_store(self.db_path).is_action_active(action_type, user_id):
+                return True
+        except Exception as exc:
+            logger.warning("Error querying persistent dedup store for is_action_active(%s, %s): %s", user_id, action, exc)
+
+        # 2. In-memory fallback
         key = self._key(user_id, action)
         with self._lock:
             rec = self._records.get(key)
@@ -182,6 +208,22 @@ class IdentityActionRegistry:
             return False
 
     def get_record(self, user_id: str, action: str) -> Optional[Dict[str, Any]]:
+        action_type = self._normalize_action_type(action)
+        try:
+            db_rec = get_dedup_store(self.db_path).get_action_record(action_type, user_id)
+            if db_rec:
+                return {
+                    "alert_id": db_rec.get("alert_id"),
+                    "user_id": user_id,
+                    "action": action,
+                    "status": db_rec.get("status"),
+                    "action_id": db_rec.get("action_id"),
+                    "provider": db_rec.get("provider"),
+                    "time": datetime.fromisoformat(db_rec["updated_at"]) if "updated_at" in db_rec else datetime.now(timezone.utc),
+                }
+        except Exception as exc:
+            logger.warning("Error reading db_rec for user %s: %s", user_id, exc)
+
         key = self._key(user_id, action)
         with self._lock:
             rec = self._records.get(key)
@@ -196,6 +238,18 @@ class IdentityActionRegistry:
         action_id: Optional[str] = None,
         provider: Optional[str] = None,
     ) -> None:
+        action_type = self._normalize_action_type(action)
+        try:
+            get_dedup_store(self.db_path).complete_action(
+                action_type=action_type,
+                target_id=user_id,
+                status=status,
+                action_id=action_id,
+                cooldown_seconds=self.cooldown_seconds,
+            )
+        except Exception as exc:
+            logger.warning("Error updating persistent dedup store for identity: %s", exc)
+
         key = self._key(user_id, action)
         with self._lock:
             self._records[key] = {
@@ -209,8 +263,57 @@ class IdentityActionRegistry:
             }
 
     def clear(self) -> None:
+        try:
+            get_dedup_store(self.db_path).clear()
+        except Exception as exc:
+            logger.warning("Error clearing persistent dedup store for identity: %s", exc)
+
         with self._lock:
             self._records.clear()
+
+    def is_duplicate(self, action_or_target: str, target_or_action: Optional[str] = None) -> bool:
+        """Flexible duplicate check supporting either (action, target) or (target, action)."""
+        if target_or_action is None:
+            return self.is_action_active(action_or_target, ACTION_SUSPEND_ACCOUNT)
+        if "@" in target_or_action or "." in target_or_action:
+            return self.is_action_active(target_or_action, action_or_target)
+        return self.is_action_active(action_or_target, target_or_action)
+
+    def record_action(
+        self,
+        action_type: str,
+        target: str,
+        alert_id: str,
+        status: str,
+        provider: str = "graph",
+        action_id: Optional[str] = None,
+        telemetry: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Convenience alias for record()."""
+        self.record(
+            user_id=target,
+            action=action_type,
+            alert_id=alert_id,
+            status=status,
+            provider=provider,
+            action_id=action_id,
+        )
+
+    def get_duplicate_response(self, action_or_target: str, target_or_action: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Returns standard duplicate response dictionary for an active identity action."""
+        if target_or_action and ("@" in target_or_action or "." in target_or_action):
+            user_id = target_or_action
+            action = action_or_target
+        else:
+            user_id = action_or_target
+            action = target_or_action or ACTION_SUSPEND_ACCOUNT
+        rec = self.get_record(user_id, action)
+        return {
+            "status": "duplicate",
+            "action": action,
+            "user_id": user_id,
+            "original_status": rec.get("status") if rec else None,
+        }
 
 
 _GLOBAL_IDENTITY_REGISTRY = IdentityActionRegistry()

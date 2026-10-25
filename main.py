@@ -47,6 +47,15 @@ from containment.identity_response import (
 )
 from containment.network_containment import execute_network_containment
 from integrations.alert_parser import AlertParsingError, parse_and_enrich_alert
+from security.auth import (
+    AuthenticatedIdentity,
+    PERM_CONTAINMENT_COORDINATE,
+    PERM_CONTAINMENT_EXECUTE,
+    PERM_IDENTITY_REVOKE,
+    PERM_IDENTITY_SUSPEND,
+    PERM_INCIDENT_WRITE,
+    require_permission,
+)
 
 # Setup logging
 logger = logging.getLogger("orchestrator")
@@ -330,6 +339,7 @@ def get_incident_endpoint(alert_id: str) -> IncidentResponse:
 def update_incident_status_endpoint(
     alert_id: str,
     update_data: IncidentUpdateStatus,
+    _identity: AuthenticatedIdentity = Depends(require_permission(PERM_INCIDENT_WRITE)),
 ) -> IncidentResponse:
     """Update the lifecycle status of an existing incident."""
     try:
@@ -348,6 +358,7 @@ def update_incident_status_endpoint(
 def trigger_network_containment_endpoint(
     alert: Alert,
     dry_run: Optional[bool] = None,
+    _identity: AuthenticatedIdentity = Depends(require_permission(PERM_CONTAINMENT_EXECUTE)),
 ) -> dict:
     """
     Week 2 Day 2: Network Containment & EDR Isolation Endpoint.
@@ -365,6 +376,7 @@ def trigger_network_containment_endpoint(
 def trigger_account_suspension_endpoint(
     alert: Alert,
     dry_run: Optional[bool] = None,
+    _identity: AuthenticatedIdentity = Depends(require_permission(PERM_IDENTITY_SUSPEND)),
 ) -> dict:
     """
     Week 2 Day 4: Identity Provider Account Suspension Endpoint.
@@ -382,6 +394,7 @@ def trigger_account_suspension_endpoint(
 def trigger_session_revocation_endpoint(
     alert: Alert,
     dry_run: Optional[bool] = None,
+    _identity: AuthenticatedIdentity = Depends(require_permission(PERM_IDENTITY_REVOKE)),
 ) -> dict:
     """
     Week 2 Day 5: User Sign-in Session Revocation Endpoint.
@@ -396,6 +409,7 @@ def trigger_session_revocation_endpoint(
 def trigger_coordinated_response_endpoint(
     alert: Alert,
     dry_run: Optional[bool] = None,
+    _identity: AuthenticatedIdentity = Depends(require_permission(PERM_CONTAINMENT_COORDINATE)),
 ) -> dict:
     """
     Week 2 Day 5: Coordinated Incident Response Orchestration Endpoint.

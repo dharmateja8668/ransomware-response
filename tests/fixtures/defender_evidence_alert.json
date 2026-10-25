@@ -1,0 +1,21 @@
+{
+  "alertId": "da-def-evidence-888",
+  "incidentId": 4501,
+  "serviceSource": "MicrosoftDefenderForEndpoint",
+  "severity": "Medium",
+  "createdDateTime": "2026-10-18T16:45:00Z",
+  "description": "Suspicious PowerShell script attempting volume shadow copy deletion",
+  "computerDnsName": "DC-BACKUP-01",
+  "lastIpAddress": "10.0.1.20",
+  "userAccount": {
+    "accountName": "svc-backup",
+    "domainName": "CONTOSO"
+  },
+  "evidence": [
+    {
+      "entityType": "File",
+      "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "fileName": "vssadmin_wrapper.exe"
+    }
+  ]
+}

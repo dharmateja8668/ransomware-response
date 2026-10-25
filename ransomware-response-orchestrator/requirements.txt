@@ -1,0 +1,7 @@
+# Core EDR HTTP Communication and Configuration
+requests>=2.31.0
+python-dotenv>=1.0.0
+
+# Testing and Mocking Framework
+pytest>=8.0.0
+pytest-mock>=3.12.0

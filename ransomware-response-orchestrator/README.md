@@ -328,3 +328,353 @@ git commit -m "Day 1: EDR Live Response Integration - Microsoft Defender for End
 # (Optional) Push changes to remote repository branch
 git push origin dharma
 ```
+
+---
+
+# Week 3 — Day 2: Automated Forensic Evidence Collection
+
+## 1. Purpose and Architecture
+
+Week 3 Day 2 implements automated, authorized forensic evidence collection across endpoints confirmed to be contained under active ransomware incidents. Forensic evidence collection captures volatile memory and non-volatile disk artifacts crucial for SOC root cause analysis, threat actor attribution, and timeline reconstruction without risking data tampering or malware propagation.
+
+### Architecture & Operational Workflow
+
+```text
+               EDR Security Incident (e.g., #1002)
+                               │
+                               ▼
+                 Identify Affected Endpoint(s)
+                               │
+                               ▼
+                 Check Containment Status
+              (ISOLATED / NOT_ISOLATED / UNKNOWN)
+                               │
+                ┌──────────────┴──────────────┐
+                ▼                             ▼
+       NOT_ISOLATED or UNKNOWN             ISOLATED
+                │                             │
+                ▼                             ▼
+      [STRICT REFUSAL]              Validate Authorization
+   Safety Check Violation           (Incident Affiliation Check)
+                                              │
+                                              ▼
+                                 Initiate Forensic Collection
+                                              │
+                     ┌────────────────────────┼────────────────────────┐
+                     ▼                        ▼                        ▼
+              KAPE Collection          RAM Acquisition        MDE Investigation
+             (Windows Artifacts)      (Physical Memory)            Package
+                     │                        │                        │
+                     └────────────────────────┼────────────────────────┘
+                                              │
+                                              ▼
+                                     Track Collection Job
+                                 (PENDING -> RUNNING -> DONE)
+                                              │
+                                              ▼
+                                   Record Evidence Metadata
+                                 (JSON Manifest in evidence/)
+                                              │
+                                              ▼
+                                    Report Manifest Status
+```
+
+### Modular Structure
+
+```text
+ransomware-response-orchestrator/
+│
+├── app.py                             # CLI entrypoint supporting Day 1 triage & Day 2 collection
+├── requirements.txt                   # Dependency definitions
+├── .env.example                       # Configuration template including forensic settings
+├── .gitignore                         # Protects secrets, logs, caches, and evidence/
+│
+├── integrations/
+│   ├── __init__.py                    # Exports DefenderClient and exceptions
+│   └── defender_client.py             # MDE OAuth2, containment checks, machine action APIs
+│
+├── forensic/                          # Day 2 Forensic Module
+│   ├── __init__.py                    # Public exports of service, adapters, metadata, exceptions
+│   ├── metadata.py                    # EvidenceMetadata model, enums (KAPE, RAM, Status)
+│   ├── evidence_collector.py          # Adapter implementations (KAPE, RAM, Investigation Package)
+│   └── collection_service.py          # Central ForensicCollectionService with safety checks
+│
+├── services/
+│   ├── __init__.py
+│   └── incident_service.py            # Day 1 incident triage and containment assessment
+│
+├── evidence/                          # Persistent storage for evidence metadata manifests
+│   ├── .gitkeep
+│   └── metadata/                      # Generated JSON manifests (e.g., kape-xxxx_metadata.json)
+│
+├── logs/
+│   ├── .gitkeep
+│   └── orchestrator.log               # Redacted audit logging
+│
+└── tests/
+    ├── __init__.py
+    ├── test_incidents.py              # 21 Day 1 incident triage unit tests
+    ├── test_evidence_collector.py     # 17 Day 2 adapter & metadata unit tests
+    └── test_collection_service.py     # 16 Day 2 orchestration & 12 mock scenario tests
+```
+
+---
+
+## 2. Required Dependencies
+
+The forensic evidence collection module uses standard Python 3.10+ libraries alongside existing core dependencies:
+
+* `requests>=2.31.0`: HTTPS communication with Microsoft Entra ID (Azure AD) and Defender REST APIs.
+* `python-dotenv>=1.0.0`: Secure configuration loading from local `.env` files.
+* `pytest>=8.0.0`: Automated unit and integration testing framework.
+* `pytest-mock>=3.12.0`: Mocking harness for simulating EDR responses.
+
+All forensic serialization, hashing, UUID generation, dataclasses, and path handling rely on standard library modules (`dataclasses`, `datetime`, `enum`, `json`, `uuid`, `pathlib`, `typing`, `logging`, `time`).
+
+To install dependencies:
+```powershell
+pip install -r requirements.txt
+```
+
+---
+
+## 3. Configuration Options
+
+Forensic collection behavior is governed by environment variables in `.env` (derived from `.env.example`):
+
+| Variable | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `EDR_MOCK_MODE` | Boolean | `true` | When `true`, executes safe simulated collection without live EDR credentials. |
+| `DEFENDER_TENANT_ID` | String (GUID) | (empty) | Azure Active Directory Tenant ID (required when `EDR_MOCK_MODE=false`). |
+| `DEFENDER_CLIENT_ID` | String (GUID) | (empty) | Registered App Client ID (required when `EDR_MOCK_MODE=false`). |
+| `DEFENDER_CLIENT_SECRET` | String | (empty) | App registration secret (never logged or exposed in manifests). |
+| `DEFENDER_API_BASE_URL` | URL | `https://api.securitycenter.microsoft.com` | Base URL for Microsoft Defender for Endpoint REST API. |
+| `EDR_TIMEOUT_SECONDS` | Integer | `15` | Network timeout for EDR REST API requests. |
+| `EVIDENCE_DIR` | Path | `./evidence/metadata` | Directory where forensic JSON manifests are persisted. |
+| `DEFAULT_COLLECTION_METHOD` | Enum | `KAPE` | Default method if `--method` is omitted (`KAPE`, `RAM`, `INVESTIGATION_PACKAGE`). |
+| `KAPE_ARTIFACT_CATEGORIES` | CSV String | `Registry,FileSystem,EventLogs,Execution,Persistence` | Default artifact categories for KAPE triage profile. |
+| `LOG_LEVEL` | String | `INFO` | Logging verbosity (`DEBUG`, `INFO`, `WARNING`, `ERROR`). |
+
+---
+
+## 4. Mock-Mode Execution
+
+Mock mode allows safe local verification, automated CI testing, and SOC demonstrations without contacting a live EDR tenant:
+
+### 1. Successful KAPE Collection on Contained Endpoint (Incident 1002)
+```powershell
+python app.py --mock --collect --incident 1002 --endpoint ISOLATED-HOST
+```
+
+### 2. Successful RAM Acquisition Workflow
+```powershell
+python app.py --mock --collect --incident 1002 --endpoint ISOLATED-HOST --method RAM
+```
+
+### 3. Native Microsoft Defender Investigation Package Collection
+```powershell
+python app.py --mock --collect --incident 1002 --endpoint ISOLATED-HOST --method investigation_package
+```
+
+### 4. Custom KAPE Artifact Category Selection
+```powershell
+python app.py --mock --collect --incident 1002 --endpoint ISOLATED-HOST --artifacts Registry,EventLogs,Execution
+```
+
+### 5. Asynchronous Polling with `--wait`
+```powershell
+python app.py --mock --collect --incident 1002 --endpoint ISOLATED-HOST --wait
+```
+
+### 6. Query Job Status by Job ID
+```powershell
+python app.py --mock --status <COLLECTION_JOB_ID>
+```
+
+### 7. List All Tracked Collection Manifests
+```powershell
+python app.py --mock --list-collections
+```
+
+### 8. Verification of Safety Check Refusal (Uncontained Endpoint)
+```powershell
+# Attempting collection on an endpoint that is NOT_ISOLATED (Incident 1001 / FINANCE-SRV-01)
+python app.py --mock --collect --incident 1001 --endpoint FINANCE-SRV-01
+# Expected result: Exit code 4, Safety Violation reported, collection strictly refused.
+```
+
+---
+
+## 5. Real EDR Integration Prerequisites
+
+To connect to a live Microsoft Defender for Endpoint environment (`EDR_MOCK_MODE=false`), the following requirements must be met:
+
+1. **Azure Active Directory (Microsoft Entra ID) App Registration**:
+   * An Application Registration with Client ID and Client Secret.
+2. **Microsoft Defender for Endpoint API Permissions (Application Permissions)**:
+   * `Machine.Read.All`: Retrieve device inventory and containment status.
+   * `Incident.Read.All`: Retrieve security incident details and alert associations.
+   * `Machine.LiveResponse`: Initiate Live Response sessions for script-based collection.
+   * `Machine.CollectForensics`: Initiate native Investigation Package actions (`/collectInvestigationPackage`).
+3. **Live Response Settings in Defender Security Portal**:
+   * Settings -> Endpoints -> Advanced Features:
+     * **Live Response**: Enabled for Windows.
+     * **Live Response unsigned script execution**: Enabled (if custom un-signed PowerShell runners are used).
+
+---
+
+## 6. KAPE Integration Prerequisites
+
+When executing KAPE (Kroll Artifact Parser and Extractor) in production environments:
+
+1. **Endpoint Target Requirements**:
+   * KAPE is supported on Windows endpoints (Windows 10/11, Windows Server 2016+).
+2. **Execution via EDR Live Response**:
+   * The EDR does not natively ship with third-party tools pre-installed. KAPE must either be:
+     * Pre-staged on golden machine images under a restricted administrative path (e.g. `C:\ProgramData\Forensics\KAPE\`), OR
+     * Uploaded dynamically via the Microsoft Defender Live Response library (`putfile` command).
+3. **Live Response Library Automation Script**:
+   * A signed PowerShell wrapper (`Run-Kape.ps1`) must be registered in the Microsoft Defender Live Response Script Library to run KAPE non-interactively with approved Target (`--tshow`) and Module configurations.
+4. **Adapter Guarantee**:
+   * The orchestrator's `KapeCollectionAdapter` actively verifies whether Live Response scripts are available. If unconfigured in live mode, it reports a diagnostic configuration error rather than claiming collection occurred.
+
+---
+
+## 7. RAM Acquisition Limitations
+
+1. **Standard REST API Boundary**:
+   * Commercial EDR cloud APIs (including Microsoft Defender for Endpoint REST API) **do not** natively provide a physical raw RAM dump endpoint across the REST interface.
+   * Native Defender investigation packages collect volatile metadata (running process list, active TCP/UDP sockets, memory minidumps of flagged processes), but **not** a full contiguous physical RAM image.
+2. **Kernel Driver Requirements**:
+   * Acquiring full physical RAM (e.g., 16 GB - 64 GB) requires a signed kernel memory acquisition driver (such as `WinPmem`, `DumpIt`, or `AVML`) executed with local SYSTEM / kernel-level privileges.
+3. **Bandwidth and Network Isolation Considerations**:
+   * Dumping full physical memory across an isolated endpoint network channel requires significant network throughput and dedicated staging storage.
+4. **Truthfulness and Simulation Guarantee**:
+   * The orchestrator will **never** generate a fake file and claim it is live RAM evidence.
+   * If real acquisition tooling is unavailable, the system records an explicit failure reason or executes in simulated mode with `simulation_indicator=True` explicitly noted.
+
+---
+
+## 8. Collection Status Definitions
+
+Forensic jobs transition through four distinct lifecycle states:
+
+* `PENDING`: The collection request has been validated and accepted by the service; adapter dispatch is queued.
+* `RUNNING`: The collection action has been accepted by the endpoint or EDR Live Response engine; execution is actively underway.
+* `COMPLETED`: The collection succeeded; artifact package location (or SAS download URL), file hash, and completion timestamp are recorded in the manifest.
+* `FAILED`: The collection aborted due to safety checks, endpoint timeouts, permission failures, or script execution errors. Diagnostic error details are recorded.
+
+---
+
+## 9. Unit-Test Commands
+
+Run the complete automated test suite across Day 1 and Day 2:
+
+```powershell
+# Navigate to the orchestrator directory
+cd "d:\ransomware response\ransomware-response-orchestrator"
+
+# Run all unit tests (Day 1 + Day 2)
+pytest -v
+
+# Run Day 2 forensic collector adapter tests
+pytest -v tests/test_evidence_collector.py
+
+# Run Day 2 collection service & 12 mock scenario tests
+pytest -v tests/test_collection_service.py
+
+# Run Day 1 regression tests
+pytest -v tests/test_incidents.py
+```
+
+### Actual Test Results (54 passed in 1.67s):
+```text
+tests/test_collection_service.py::test_scenario_01_successful_kape_collection PASSED
+tests/test_collection_service.py::test_scenario_02_successful_ram_acquisition PASSED
+tests/test_collection_service.py::test_scenario_03_collection_still_running PASSED
+tests/test_collection_service.py::test_scenario_04_collection_failure PASSED
+tests/test_collection_service.py::test_scenario_05_endpoint_not_contained PASSED
+tests/test_collection_service.py::test_scenario_06_unknown_containment_status PASSED
+tests/test_collection_service.py::test_scenario_07_unsupported_collection_method PASSED
+tests/test_collection_service.py::test_scenario_08_missing_endpoint_identifier PASSED
+tests/test_collection_service.py::test_scenario_09_edr_authentication_failure PASSED
+tests/test_collection_service.py::test_scenario_10_edr_api_timeout PASSED
+tests/test_collection_service.py::test_scenario_11_duplicate_collection_request PASSED
+tests/test_collection_service.py::test_scenario_12_missing_artifact_location PASSED
+tests/test_collection_service.py::test_endpoint_incident_mismatch_refused PASSED
+tests/test_collection_service.py::test_track_job_polls_to_completion PASSED
+tests/test_collection_service.py::test_list_jobs_and_filtering PASSED
+tests/test_collection_service.py::test_simulated_evidence_is_never_represented_as_real_evidence PASSED
+tests/test_evidence_collector.py::test_evidence_metadata_defaults PASSED
+tests/test_evidence_collector.py::test_evidence_metadata_lifecycle_transitions PASSED
+tests/test_evidence_collector.py::test_evidence_metadata_serialization_and_persistence PASSED
+tests/test_evidence_collector.py::test_evidence_metadata_contains_no_sensitive_secrets PASSED
+tests/test_evidence_collector.py::test_kape_adapter_properties PASSED
+tests/test_evidence_collector.py::test_kape_adapter_validate_categories PASSED
+tests/test_evidence_collector.py::test_kape_adapter_mock_successful_execution PASSED
+tests/test_evidence_collector.py::test_kape_adapter_mock_failure_simulation PASSED
+tests/test_evidence_collector.py::test_kape_adapter_mock_running_simulation_and_poll PASSED
+tests/test_evidence_collector.py::test_kape_adapter_live_rejection_without_library_scripts PASSED
+tests/test_evidence_collector.py::test_ram_adapter_properties PASSED
+tests/test_evidence_collector.py::test_ram_adapter_mock_successful_workflow PASSED
+tests/test_evidence_collector.py::test_ram_adapter_never_labels_arbitrary_files_as_real_ram PASSED
+tests/test_evidence_collector.py::test_ram_adapter_mock_failure_simulation PASSED
+tests/test_evidence_collector.py::test_ram_adapter_live_rejection PASSED
+tests/test_evidence_collector.py::test_investigation_package_mock_initiation PASSED
+tests/test_evidence_collector.py::test_investigation_package_polling PASSED
+tests/test_incidents.py::test_edr_config_missing_credentials_raises_error PASSED
+... [21 Day 1 tests passed] ...
+
+============================= 54 passed in 1.67s ==============================
+```
+
+---
+
+## 10. Example Output
+
+### Command: KAPE Evidence Collection (Mock Mode)
+```powershell
+python app.py --mock --collect --incident 1002 --endpoint ISOLATED-HOST
+```
+
+### Terminal Output:
+```text
+================================================================================
+     AUTOMATED RANSOMWARE CONTAINMENT & INCIDENT RESPONSE ORCHESTRATOR
+         DAY 1: EDR LIVE RESPONSE | DAY 2: FORENSIC EVIDENCE COLLECTION
+================================================================================
+
+[*] Initiating Day 2 Forensic Evidence Collection:
+    Incident ID : #1002
+    Endpoint    : ISOLATED-HOST
+    Method      : KAPE
+    Categories  : Default Profile
+    [Notice: Running in MOCK MODE - Safe non-production simulated collection]
+
+--------------------------------------------------------------------------------
+[*] FORENSIC EVIDENCE COLLECTION MANIFEST: Job kape-b35f7e1452
+--------------------------------------------------------------------------------
+  Incident ID          : #1002
+  Endpoint Identifier  : mach-ISOLATED-HOST
+  Endpoint Hostname    : ISOLATED-HOST.corp.contoso.com
+  Collection Method    : KAPE
+  Requested Artifacts  : Registry, FileSystem, EventLogs, Execution, Persistence
+  Collection Status    : [COMPLETED]
+  Requested At (UTC)   : 2026-10-26T14:14:49.817758+00:00
+  Completed At (UTC)   : 2026-10-26T14:14:49.817783+00:00
+  Artifact Location    : evidence/simulated/kape_ISOLATED-HOST.corp.contoso.com_20261026T141449Z_kape-b.zip
+  File Size (Bytes)    : 48234102
+  SHA-256 Hash         : simulated-sha256-e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+  Simulation Indicator : SIMULATED RUN (Non-production test)
+  Containment Verified : YES (Endpoint confirmed ISOLATED)
+  Diagnostic Notes     : Simulated KAPE package collection completed successfully.
+--------------------------------------------------------------------------------
+```
+
+---
+
+## 11. Known Limitations
+
+1. **Live Response Permissions in MDE**: Live KAPE collection requires pre-configured Live Response scripts uploaded to Microsoft Defender Security Center and approved administrative permissions (`Machine.LiveResponse`).
+2. **Physical RAM Acquisition**: Standard EDR REST APIs cannot directly capture contiguous physical memory dumps. Production RAM acquisition requires dedicated endpoint agents or Live Response kernel acquisition drivers (`WinPmem`).
+3. **Evidence Storage & Cloud Upload**: Day 2 generates local evidence manifests. Cloud evidence archiving (AWS S3 signed upload with retention policies) is scheduled for Day 3 and Day 4.

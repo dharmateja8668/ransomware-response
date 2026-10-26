@@ -165,6 +165,7 @@ class DefenderClient:
         self._access_token: Optional[str] = None
         self._token_expires_at: float = 0.0
         self._session = requests.Session()
+        self._mock_machine_actions: Dict[str, Dict[str, Any]] = {}
         logger.info("Initialized DefenderClient (Mock Mode: %s)", self.config.mock_mode)
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -425,6 +426,168 @@ class DefenderClient:
         return self._evaluate_containment_status(machine_data)
 
     # ─────────────────────────────────────────────────────────────────────────
+    # Day 2: Live Response & Investigation Package Actions
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def collect_investigation_package(
+        self, machine_id: str, comment: str = "Forensic evidence collection initiated by IR orchestrator"
+    ) -> Dict[str, Any]:
+        """
+        Initiates an investigation package collection on an endpoint via Defender for Endpoint API.
+
+        Official Defender Endpoint:
+          POST https://api.securitycenter.microsoft.com/api/machines/{machine_id}/collectInvestigationPackage
+
+        Body:
+          {"Comment": comment}
+
+        Returns:
+          Dictionary with action_id, status, creation_time, machine_id.
+        """
+        target = str(machine_id).strip()
+        if not target:
+            raise ValueError("Machine ID cannot be empty.")
+
+        logger.info("Initiating investigation package collection for machine: %s", target)
+
+        if self.config.mock_mode:
+            return self._mock_collect_investigation_package(target, comment)
+
+        url = f"{self.config.api_base_url}/api/machines/{target}/collectInvestigationPackage"
+        headers = self._get_auth_headers()
+        body = {"Comment": comment}
+
+        try:
+            response = self._session.post(url, json=body, headers=headers, timeout=self.config.timeout_seconds)
+        except Timeout as err:
+            logger.error("Timeout initiating investigation package for %s: %s", target, err)
+            raise EDRTimeoutError(f"Timeout initiating investigation package for {target}: {err}") from err
+        except ConnectionError as err:
+            logger.error("Connection error initiating investigation package for %s: %s", target, err)
+            raise EDRConnectionError(f"Connection failure initiating investigation package for {target}: {err}") from err
+        except RequestException as err:
+            raise EDRAPIError(f"API request failed initiating investigation package for {target}: {err}") from err
+
+        if response.status_code == 404:
+            raise EDRAPIError(f"Machine '{target}' not found in Defender inventory (HTTP 404).", status_code=404)
+        if response.status_code not in (200, 201):
+            raise EDRAPIError(
+                f"Failed to initiate investigation package for {target} (HTTP {response.status_code}): {response.text}",
+                status_code=response.status_code,
+            )
+
+        data = response.json()
+        return self._normalize_machine_action(data)
+
+    def get_machine_action(self, action_id: str) -> Dict[str, Any]:
+        """
+        Retrieves the status of a machine action (such as investigation package collection).
+
+        Official Defender Endpoint:
+          GET https://api.securitycenter.microsoft.com/api/machineactions/{action_id}
+        """
+        target = str(action_id).strip()
+        if not target:
+            raise ValueError("Action ID cannot be empty.")
+
+        logger.info("Checking status for machine action: %s", target)
+
+        if self.config.mock_mode:
+            return self._mock_get_machine_action(target)
+
+        url = f"{self.config.api_base_url}/api/machineactions/{target}"
+        headers = self._get_auth_headers()
+
+        try:
+            response = self._session.get(url, headers=headers, timeout=self.config.timeout_seconds)
+        except Timeout as err:
+            raise EDRTimeoutError(f"Timeout checking machine action {target}: {err}") from err
+        except ConnectionError as err:
+            raise EDRConnectionError(f"Connection failure checking machine action {target}: {err}") from err
+        except RequestException as err:
+            raise EDRAPIError(f"API request failed checking machine action {target}: {err}") from err
+
+        if response.status_code == 404:
+            raise EDRAPIError(f"Machine action '{target}' not found (HTTP 404).", status_code=404)
+        if response.status_code != 200:
+            raise EDRAPIError(
+                f"Failed to check machine action {target} (HTTP {response.status_code}): {response.text}",
+                status_code=response.status_code,
+            )
+
+        data = response.json()
+        return self._normalize_machine_action(data)
+
+    def get_package_uri(self, action_id: str) -> Optional[str]:
+        """
+        Retrieves the secure SAS download URL for a completed investigation package.
+
+        Official Defender Endpoint:
+          GET https://api.securitycenter.microsoft.com/api/machineactions/{action_id}/GetPackageUri
+        """
+        target = str(action_id).strip()
+        if not target:
+            raise ValueError("Action ID cannot be empty.")
+
+        logger.info("Retrieving package URI for machine action: %s", target)
+
+        if self.config.mock_mode:
+            return self._mock_get_package_uri(target)
+
+        url = f"{self.config.api_base_url}/api/machineactions/{target}/GetPackageUri"
+        headers = self._get_auth_headers()
+
+        try:
+            response = self._session.get(url, headers=headers, timeout=self.config.timeout_seconds)
+        except Timeout as err:
+            raise EDRTimeoutError(f"Timeout retrieving package URI for {target}: {err}") from err
+        except ConnectionError as err:
+            raise EDRConnectionError(f"Connection failure retrieving package URI for {target}: {err}") from err
+        except RequestException as err:
+            raise EDRAPIError(f"API request failed retrieving package URI for {target}: {err}") from err
+
+        if response.status_code == 404:
+            return None
+        if response.status_code != 200:
+            raise EDRAPIError(
+                f"Failed to retrieve package URI for {target} (HTTP {response.status_code}): {response.text}",
+                status_code=response.status_code,
+            )
+
+        data = response.json()
+        return data.get("value")
+
+    def check_live_response_capability(self, machine_id: str) -> Dict[str, Any]:
+        """
+        Checks whether Live Response capability is supported and enabled on the endpoint.
+        """
+        target = str(machine_id).strip()
+        if not target:
+            raise ValueError("Machine ID cannot be empty.")
+
+        if self.config.mock_mode:
+            return self._mock_check_live_response_capability(target)
+
+        url = f"{self.config.api_base_url}/api/machines/{target}"
+        headers = self._get_auth_headers()
+        try:
+            response = self._session.get(url, headers=headers, timeout=self.config.timeout_seconds)
+            if response.status_code != 200:
+                return {"supported": False, "reason": f"Machine query failed (HTTP {response.status_code})"}
+            mach = response.json()
+            os_plat = str(mach.get("osPlatform", "")).lower()
+            supported = "windows" in os_plat or "linux" in os_plat or "macos" in os_plat
+            return {
+                "supported": supported,
+                "os_platform": mach.get("osPlatform"),
+                "os_version": mach.get("osVersion"),
+                "live_response_configured": False,
+                "reason": "Live Response requires library script registration",
+            }
+        except Exception as err:
+            return {"supported": False, "reason": str(err)}
+
+    # ─────────────────────────────────────────────────────────────────────────
     # Helper Methods: Normalization & Evaluation
     # ─────────────────────────────────────────────────────────────────────────
 
@@ -548,7 +711,31 @@ class DefenderClient:
         if incident_id == "500" or incident_id == "server_error":
             raise EDRAPIError("Internal Server Error in Defender API.", status_code=500)
 
-        # High-severity ransomware incident mock
+        if incident_id in ("1002", "contained"):
+            mock_raw = {
+                "incidentId": 1002,
+                "incidentName": "Contained Ransomware Outbreak (LockBit 3.0 Telemetry)",
+                "createdTime": "2026-10-25T15:10:00Z",
+                "lastUpdateTime": "2026-10-25T15:45:00Z",
+                "status": "Active",
+                "severity": "High",
+                "classification": "TruePositive",
+                "determination": "Ransomware",
+                "alerts": [
+                    {
+                        "alertId": "da-99120-alert-01",
+                        "title": "Ransomware payload execution contained via endpoint network isolation",
+                        "category": "Ransomware",
+                        "severity": "High",
+                        "machineId": "mach-isolated-host",
+                        "computerDnsName": "ISOLATED-HOST.corp.contoso.com",
+                        "lastIpAddress": "10.0.8.22",
+                    }
+                ],
+            }
+            return self._normalize_incident_data(mock_raw)
+
+        # High-severity ransomware incident mock (Incident 1001: unisolated active outbreak)
         mock_raw = {
             "incidentId": int(incident_id) if incident_id.isdigit() else 1001,
             "incidentName": "Multi-stage Ransomware Activity Detected (BlackCat/ALPHV Heuristics)",
@@ -585,7 +772,7 @@ class DefenderClient:
         """Generates realistic containment verification responses."""
         target_lower = target.lower()
 
-        if target_lower in ("isolated-host", "isolated-pc", "isolated"):
+        if target_lower in ("isolated-host", "isolated-pc", "isolated") or "isolated" in target_lower:
             raw_status = "Isolated"
             risk = "High"
             health = "Active"
@@ -618,3 +805,94 @@ class DefenderClient:
             "riskScore": risk,
         }
         return self._evaluate_containment_status(mock_machine)
+
+    def _normalize_machine_action(self, raw: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalizes Defender machine action telemetry."""
+        return {
+            "action_id": str(raw.get("id") or raw.get("action_id", "")),
+            "action_type": raw.get("type") or raw.get("action_type", "Unknown"),
+            "status": raw.get("status", "Pending"),
+            "machine_id": raw.get("machineId") or raw.get("machine_id", ""),
+            "creation_time": raw.get("creationDateTimeUtc") or raw.get("creation_time"),
+            "last_update_time": raw.get("lastUpdateDateTimeUtc") or raw.get("last_update_time"),
+            "error_code": raw.get("errorCode"),
+            "raw_data": raw,
+        }
+
+    def _mock_collect_investigation_package(self, machine_id: str, comment: str) -> Dict[str, Any]:
+        """Generates mock machine action for investigation package collection."""
+        target_lower = machine_id.lower()
+        if "not-found" in target_lower or "404" in target_lower:
+            raise EDRAPIError(f"Machine '{machine_id}' not found (HTTP 404).", status_code=404)
+        if "auth-fail" in target_lower:
+            raise EDRAuthenticationError("Azure AD token expired or invalid.")
+        if "timeout" in target_lower:
+            raise EDRTimeoutError(f"Timeout communicating with Defender API for machine {machine_id}.")
+
+        import uuid
+        action_id = f"act-{uuid.uuid4().hex[:8]}"
+        initial_status = "InProgress" if "running" in target_lower else ("Failed" if "fail" in target_lower else "Succeeded")
+
+        action_data = {
+            "id": action_id,
+            "type": "CollectInvestigationPackage",
+            "status": initial_status,
+            "machineId": machine_id,
+            "creationDateTimeUtc": datetime.now(timezone.utc).isoformat(),
+            "lastUpdateDateTimeUtc": datetime.now(timezone.utc).isoformat(),
+            "errorCode": "SimulatedCollectionFailure" if initial_status == "Failed" else None,
+            "comment": comment,
+        }
+        self._mock_machine_actions[action_id] = action_data
+        return self._normalize_machine_action(action_data)
+
+    def _mock_get_machine_action(self, action_id: str) -> Dict[str, Any]:
+        """Retrieves mock machine action."""
+        if action_id == "404" or "not-found" in action_id.lower():
+            raise EDRAPIError(f"Machine action '{action_id}' not found (HTTP 404).", status_code=404)
+        if "timeout" in action_id.lower():
+            raise EDRTimeoutError(f"Timeout querying action {action_id}.")
+
+        if action_id in self._mock_machine_actions:
+            return self._normalize_machine_action(self._mock_machine_actions[action_id])
+
+        # Default fallback mock action
+        action_data = {
+            "id": action_id,
+            "type": "CollectInvestigationPackage",
+            "status": "Succeeded",
+            "machineId": "f489a71b-324e-4f01-92bb-187640df21a1",
+            "creationDateTimeUtc": datetime.now(timezone.utc).isoformat(),
+            "lastUpdateDateTimeUtc": datetime.now(timezone.utc).isoformat(),
+            "errorCode": None,
+        }
+        return self._normalize_machine_action(action_data)
+
+    def _mock_get_package_uri(self, action_id: str) -> Optional[str]:
+        """Retrieves mock package SAS download URI."""
+        if "missing-uri" in action_id.lower() or "no-location" in action_id.lower():
+            return None
+        action = self._mock_machine_actions.get(action_id, {})
+        if action.get("status") == "Failed":
+            return None
+        mach_id = action.get("machineId", "f489a71b-324e-4f01-92bb-187640df21a1")
+        return f"https://mockstorage.blob.core.windows.net/defender-evidence/{mach_id}/InvestigationPackage_{action_id}.zip?sv=2026-10-26&sig=mock_sas_token"
+
+    def _mock_check_live_response_capability(self, machine_id: str) -> Dict[str, Any]:
+        """Generates mock Live Response capability telemetry."""
+        target_lower = machine_id.lower()
+        if "unsupported" in target_lower or "legacy" in target_lower:
+            return {
+                "supported": False,
+                "os_platform": "Windows7",
+                "os_version": "6.1.7601",
+                "live_response_configured": False,
+                "reason": "Operating system does not support Defender Live Response",
+            }
+        return {
+            "supported": True,
+            "os_platform": "Windows10",
+            "os_version": "10.0.19045",
+            "live_response_configured": True,
+            "reason": None,
+        }

@@ -19,6 +19,10 @@ logs/*.log
 *.db
 *.sqlite3
 
+# Forensic Evidence generated at runtime
+evidence/*
+!evidence/.gitkeep
+
 # Test & coverage artifacts
 .pytest_cache/
 .coverage

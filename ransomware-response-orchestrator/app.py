@@ -4,18 +4,30 @@ app.py
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Automated Ransomware Containment & Incident Response Orchestrator
 Day 1: EDR Live Response Integration & Containment Verification
+Day 2: Automated Forensic Evidence Collection (KAPE, RAM, Investigation Package)
 
 Usage:
-  python app.py                      # Run automated triage demo on default incident #1001
-  python app.py --incident <ID>      # Retrieve & investigate a specific incident
-  python app.py --endpoint <NAME/ID> # Verify containment status of a single endpoint
-  python app.py --test-auth          # Test EDR authentication connectivity
-  python app.py --mock               # Force mock mode regardless of .env configuration
+  # Day 1 Operations:
+  python app.py                                # Run automated triage demo on default incident #1001
+  python app.py --incident <ID>                # Retrieve & investigate a specific incident
+  python app.py --endpoint <NAME/ID>           # Verify containment status of a single endpoint
+  python app.py --test-auth                    # Test EDR authentication connectivity
+  python app.py --mock                         # Force mock mode regardless of .env configuration
+
+  # Day 2 Forensic Evidence Collection Operations:
+  python app.py --collect --endpoint <NAME/ID> # Collect KAPE forensic evidence from contained endpoint
+  python app.py --collect --endpoint <ID> --method RAM     # Acquire physical RAM memory image
+  python app.py --collect --endpoint <ID> --method investigation_package # MDE native package
+  python app.py --collect --endpoint <ID> --artifacts Registry,EventLogs,Execution # Specific categories
+  python app.py --status <JOB_ID>              # Check status of an evidence collection job
+  python app.py --list-collections             # List all tracked evidence collection jobs
+  python app.py --collect --endpoint <ID> --wait # Wait and poll until collection completes
 
 Security Notes:
-  - All Day 1 operations are strictly READ-ONLY.
-  - Access tokens, client secrets, and passwords are fully redacted from logs.
-  - Mock mode enables complete offline execution without real credentials.
+  - Evidence collection is REFUSED unless endpoint containment status is confirmed ISOLATED.
+  - Endpoint must belong to the specified incident.
+  - Access tokens, client secrets, and passwords are fully redacted from logs and manifests.
+  - Mock mode clearly flags simulated artifacts (simulation_indicator=True).
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
@@ -27,7 +39,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 # Ensure project root is in sys.path
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -60,6 +72,24 @@ from integrations.defender_client import (
     EDRTimeoutError,
 )
 from services.incident_service import IncidentService, IncidentInvestigationReport, EndpointAssessment
+from forensic.metadata import (
+    CollectionMethod,
+    CollectionStatus,
+    DEFAULT_KAPE_CATEGORIES,
+    EvidenceMetadata,
+    KapeArtifactCategory,
+)
+from forensic.evidence_collector import (
+    CollectionJobError,
+    DuplicateJobError,
+    EndpointMismatchError,
+    EndpointNotContainedError,
+    ForensicError,
+    SafetyCheckError,
+    UnknownContainmentError,
+    UnsupportedMethodError,
+)
+from forensic.collection_service import ForensicCollectionService
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -123,7 +153,7 @@ def setup_logging(log_level_str: str = "INFO") -> logging.Logger:
 BANNER = """
 ================================================================================
      AUTOMATED RANSOMWARE CONTAINMENT & INCIDENT RESPONSE ORCHESTRATOR
-                        DAY 1: EDR LIVE RESPONSE
+         DAY 1: EDR LIVE RESPONSE | DAY 2: FORENSIC EVIDENCE COLLECTION
 ================================================================================
 """
 
@@ -194,25 +224,75 @@ def print_endpoint_assessment(assessment: EndpointAssessment) -> None:
     print(border + "\n")
 
 
+def print_forensic_collection(meta: EvidenceMetadata) -> None:
+    """Renders a structured, readable forensic evidence collection report."""
+    border = "-" * 80
+    print("\n" + border)
+    print(f"[*] FORENSIC EVIDENCE COLLECTION MANIFEST: Job {meta.collection_job_id}")
+    print(border)
+    print(f"  Incident ID          : #{meta.incident_id}")
+    print(f"  Endpoint Identifier  : {meta.endpoint_id}")
+    print(f"  Endpoint Hostname    : {meta.hostname or 'N/A'}")
+    print(f"  Collection Method    : {meta.collection_method}")
+    print(f"  Requested Artifacts  : {', '.join(meta.requested_artifacts) if meta.requested_artifacts else 'Default Profile'}")
+    print(f"  Collection Status    : [{meta.status}]")
+    print(f"  Requested At (UTC)   : {meta.requested_at}")
+    print(f"  Completed At (UTC)   : {meta.completed_at or 'In Progress'}")
+    print(f"  Artifact Location    : {meta.artifact_location or 'N/A'}")
+    print(f"  File Size (Bytes)    : {meta.file_size_bytes or 'N/A'}")
+    print(f"  SHA-256 Hash         : {meta.file_hash_sha256 or 'N/A'}")
+    print(f"  Simulation Indicator : {'SIMULATED RUN (Non-production test)' if meta.simulation_indicator else 'LIVE EDR ACQUISITION'}")
+    print(f"  Containment Verified : {'YES (Endpoint confirmed ISOLATED)' if meta.containment_verified else 'NO'}")
+    if meta.error_details:
+        print(f"  Error Details        : {meta.error_details}")
+    if meta.diagnostic_notes:
+        print(f"  Diagnostic Notes     : {meta.diagnostic_notes}")
+    print(border + "\n")
+
+
+def print_collections_list(jobs: List[EvidenceMetadata]) -> None:
+    """Renders a summary table of forensic collection jobs."""
+    border = "-" * 80
+    print("\n" + border)
+    print(f"[*] RECORDED FORENSIC COLLECTION JOBS ({len(jobs)}):")
+    print(border)
+    if not jobs:
+        print("  (No forensic collection jobs recorded yet)")
+    else:
+        for idx, job in enumerate(jobs, 1):
+            sim_flag = "[SIMULATED]" if job.simulation_indicator else "[LIVE]"
+            print(f"  [{idx}] Job ID    : {job.collection_job_id} {sim_flag}")
+            print(f"      Incident  : #{job.incident_id}")
+            print(f"      Endpoint  : {job.hostname or job.endpoint_id}")
+            print(f"      Method    : {job.collection_method}")
+            print(f"      Status    : [{job.status}]")
+            print(f"      Requested : {job.requested_at}")
+            print(f"      Artifact  : {job.artifact_location or 'N/A'}")
+            if job.error_details:
+                print(f"      Error     : {job.error_details}")
+    print(border + "\n")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CLI Entry Point
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Automated Ransomware Containment & Incident Response Orchestrator - Day 1"
+        description="Automated Ransomware Containment & Incident Response Orchestrator - Day 1 & Day 2"
     )
+    # Common Options
     parser.add_argument(
         "--incident",
         type=str,
         default=None,
-        help="Incident ID to retrieve and investigate (e.g. 1001)",
+        help="Incident ID to investigate or target for collection (e.g. 1001)",
     )
     parser.add_argument(
         "--endpoint",
         type=str,
         default=None,
-        help="Endpoint name or machine ID to verify containment status (e.g. FINANCE-SRV-01)",
+        help="Endpoint name or machine ID (e.g. FINANCE-SRV-01)",
     )
     parser.add_argument(
         "--test-auth",
@@ -228,6 +308,41 @@ def main() -> int:
         "--json",
         action="store_true",
         help="Output raw JSON format for machine parsing",
+    )
+
+    # Day 2: Forensic Collection Options
+    parser.add_argument(
+        "--collect",
+        action="store_true",
+        help="Initiate authorized forensic evidence collection on contained endpoint",
+    )
+    parser.add_argument(
+        "--method",
+        type=str,
+        default="KAPE",
+        help="Forensic collection method: KAPE (default), RAM, or INVESTIGATION_PACKAGE",
+    )
+    parser.add_argument(
+        "--artifacts",
+        type=str,
+        default=None,
+        help="Comma-separated list of KAPE artifact categories (e.g. Registry,EventLogs,Execution)",
+    )
+    parser.add_argument(
+        "--status",
+        type=str,
+        default=None,
+        help="Query status of an existing forensic collection job ID",
+    )
+    parser.add_argument(
+        "--list-collections",
+        action="store_true",
+        help="List all tracked forensic evidence collection jobs",
+    )
+    parser.add_argument(
+        "--wait",
+        action="store_true",
+        help="Wait and poll for collection job completion before exiting",
     )
 
     args = parser.parse_args()
@@ -248,7 +363,8 @@ def main() -> int:
         return 1
 
     client = DefenderClient(config)
-    service = IncidentService(client)
+    incident_service = IncidentService(client)
+    forensic_service = ForensicCollectionService(client)
 
     # 1. Test Authentication Mode
     if args.test_auth:
@@ -267,11 +383,138 @@ def main() -> int:
             print(f"[-] EDR Connection/Network Error: {err}")
             return 3
 
-    # 2. Standalone Endpoint Containment Verification
+    # 2. Forensic Job Status Query
+    if args.status:
+        job_id = args.status.strip()
+        print(f"[*] Querying status for collection job: {job_id}")
+        try:
+            if args.wait:
+                print(f"    [Polling job until completion...]")
+                meta = forensic_service.track_job(job_id)
+            else:
+                meta = forensic_service.get_collection_status(job_id)
+
+            if args.json:
+                print(meta.to_json(indent=2))
+            else:
+                print_forensic_collection(meta)
+            return 0 if meta.status == CollectionStatus.COMPLETED.value else (1 if meta.status == CollectionStatus.FAILED.value else 0)
+        except KeyError:
+            print(f"[-] Collection job '{job_id}' not found.")
+            return 1
+        except Exception as err:
+            logger.exception("Failed to query status for job %s: %s", job_id, err)
+            print(f"[-] Error querying collection job: {err}")
+            return 1
+
+    # 3. List All Forensic Collections
+    if args.list_collections:
+        print("[*] Listing recorded forensic evidence collection jobs...")
+        jobs = forensic_service.list_jobs(incident_id=args.incident, endpoint_id=args.endpoint)
+        if args.json:
+            print(json.dumps([j.to_dict() for j in jobs], indent=2))
+        else:
+            print_collections_list(jobs)
+        return 0
+
+    # 4. Initiate Forensic Evidence Collection
+    if args.collect:
+        target_incident = args.incident or "1001"
+        target_endpoint = args.endpoint
+
+        if not target_endpoint:
+            # Attempt to resolve first affected device from incident
+            print(f"[*] Target endpoint not specified. Inspecting Incident #{target_incident} for affected devices...")
+            try:
+                inc_data = client.get_incident(target_incident)
+                devices = inc_data.get("all_affected_devices", [])
+                if devices:
+                    target_endpoint = devices[0]
+                    print(f"    [Auto-selected affected device: {target_endpoint}]")
+                else:
+                    print("[-] Error: No affected endpoints found in incident. Please specify --endpoint.")
+                    return 1
+            except Exception as err:
+                print(f"[-] Error retrieving incident #{target_incident}: {err}")
+                return 1
+
+        # Parse requested categories if provided
+        cat_list = None
+        if args.artifacts:
+            cat_list = [c.strip() for c in args.artifacts.split(",") if c.strip()]
+
+        print(f"[*] Initiating Day 2 Forensic Evidence Collection:")
+        print(f"    Incident ID : #{target_incident}")
+        print(f"    Endpoint    : {target_endpoint}")
+        print(f"    Method      : {args.method.upper()}")
+        print(f"    Categories  : {cat_list or 'Default Profile'}")
+        if config.mock_mode:
+            print("    [Notice: Running in MOCK MODE - Safe non-production simulated collection]")
+
+        try:
+            metadata = forensic_service.initiate_collection(
+                incident_id=target_incident,
+                endpoint_identifier=target_endpoint,
+                method=args.method,
+                artifact_categories=cat_list,
+            )
+
+            # If --wait was requested and job is still running, poll until complete
+            if args.wait and metadata.status in (CollectionStatus.PENDING.value, CollectionStatus.RUNNING.value):
+                print(f"    [Polling job {metadata.collection_job_id} until completion...]")
+                metadata = forensic_service.track_job(metadata.collection_job_id)
+
+            if args.json:
+                print(metadata.to_json(indent=2))
+            else:
+                print_forensic_collection(metadata)
+
+            return 0 if metadata.status == CollectionStatus.COMPLETED.value else (1 if metadata.status == CollectionStatus.FAILED.value else 0)
+
+        except EndpointNotContainedError as err:
+            logger.error("Collection refused - endpoint not contained: %s", err)
+            print(f"\n[!] SAFETY VIOLATION: {err}")
+            print("[!] Forensic collection is STRICTLY REFUSED prior to endpoint containment.")
+            return 4
+        except UnknownContainmentError as err:
+            logger.error("Collection refused - unknown containment status: %s", err)
+            print(f"\n[!] SAFETY AUDIT FAILURE: {err}")
+            print("[!] Containment status must be verified as ISOLATED before evidence collection.")
+            return 4
+        except EndpointMismatchError as err:
+            logger.error("Collection refused - endpoint mismatch: %s", err)
+            print(f"\n[!] AUTHORIZATION MISMATCH: {err}")
+            return 5
+        except UnsupportedMethodError as err:
+            logger.error("Unsupported method: %s", err)
+            print(f"\n[-] Method Error: {err}")
+            return 6
+        except DuplicateJobError as err:
+            logger.warning("Duplicate collection request: %s", err)
+            print(f"\n[!] IDEMPOTENCY REJECTION: {err}")
+            return 7
+        except EDRAuthenticationError as err:
+            logger.error("EDR authentication failed: %s", err)
+            print(f"[-] EDR Authentication Error: {err}")
+            return 2
+        except (EDRTimeoutError, EDRConnectionError) as err:
+            logger.error("Network connectivity error: %s", err)
+            print(f"[-] Network Connectivity Error: {err}")
+            return 3
+        except EDRError as err:
+            logger.error("EDR API Error: %s", err)
+            print(f"[-] EDR Error: {err}")
+            return 1
+        except Exception as err:
+            logger.exception("Unexpected error during forensic collection: %s", err)
+            print(f"[-] Unexpected failure: {err}")
+            return 99
+
+    # 5. Standalone Endpoint Containment Verification (Day 1)
     if args.endpoint:
         print(f"[*] Querying containment status for endpoint: {args.endpoint}")
         try:
-            assessment = service.verify_single_endpoint(args.endpoint)
+            assessment = incident_service.verify_single_endpoint(args.endpoint)
             if args.json:
                 print(json.dumps(assessment.to_dict(), indent=2))
             else:
@@ -282,14 +525,14 @@ def main() -> int:
             print(f"[-] Error querying endpoint '{args.endpoint}': {err}")
             return 1
 
-    # 3. Incident Investigation Workflow (Targeted or Demo)
+    # 6. Incident Investigation Workflow (Day 1 Targeted or Demo)
     target_incident = args.incident or "1001"
-    print(f"[*] Initiating Day 1 Incident Triage for Incident ID: {target_incident}")
+    print(f"[*] Initiating Incident Triage for Incident ID: {target_incident}")
     if config.mock_mode:
         print("    [Notice: Running in MOCK MODE - Safe non-production simulated telemetry]")
 
     try:
-        report = service.investigate_incident(target_incident)
+        report = incident_service.investigate_incident(target_incident)
         if args.json:
             print(json.dumps(report.to_dict(), indent=2))
         else:

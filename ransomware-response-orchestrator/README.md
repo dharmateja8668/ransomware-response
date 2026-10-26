@@ -678,3 +678,291 @@ python app.py --mock --collect --incident 1002 --endpoint ISOLATED-HOST
 1. **Live Response Permissions in MDE**: Live KAPE collection requires pre-configured Live Response scripts uploaded to Microsoft Defender Security Center and approved administrative permissions (`Machine.LiveResponse`).
 2. **Physical RAM Acquisition**: Standard EDR REST APIs cannot directly capture contiguous physical memory dumps. Production RAM acquisition requires dedicated endpoint agents or Live Response kernel acquisition drivers (`WinPmem`).
 3. **Evidence Storage & Cloud Upload**: Day 2 generates local evidence manifests. Cloud evidence archiving (AWS S3 signed upload with retention policies) is scheduled for Day 3 and Day 4.
+
+---
+
+# Week 3 — Day 3: Secure AWS S3 Storage for Forensic Evidence
+
+## 1. Purpose and Architecture
+
+Week 3 Day 3 extends the incident response orchestrator with **secure, forensically sound AWS S3 cloud archiving** for evidence artifacts collected during Day 2. The module implements automated hierarchical object storage, cryptographic SHA-256 integrity verification, server-side encryption, companion metadata synchronization, and Write-Once-Read-Many (WORM) Object Lock compliance.
+
+### Cloud Archival Workflow
+
+```text
+    Forensic Evidence Package (Disk Triage / Memory Dump)
+                               │
+                               ▼
+               Calculate Pre-Upload SHA-256
+               (Streaming 64KB Chunk Hashing)
+                               │
+                               ▼
+                 Build Hierarchical Object Key
+    incidents/{incident_id}/evidence/{job_id}/{filename}
+                               │
+                               ▼
+              Upload to AWS S3 Evidence Vault
+         - Server-Side Encryption (AES256 / SSE-KMS)
+         - S3 Native SHA-256 Checksum Header (Base64)
+                               │
+                               ▼
+          Cryptographic Integrity Post-Verification
+         (HeadObject ChecksumSHA256 vs Local SHA-256)
+         * Stored ETag is NEVER treated as SHA-256 *
+                               │
+                ┌──────────────┴──────────────┐
+                ▼                             ▼
+       Checksum Mismatch               Checksum Verified
+                │                             │
+                ▼                             ▼
+       [INTEGRITY FAILURE]           Upload Companion Manifest
+     S3ChecksumMismatchError       (incidents/.../metadata.json)
+                                              │
+                                              ▼
+                                   Record Manifest Telemetry
+                                (s3_bucket, key, version_id,
+                                  s3_upload_status='VERIFIED')
+```
+
+---
+
+## 2. AWS Setup Instructions (AWS Console Step-by-Step)
+
+> [!IMPORTANT]
+> The orchestrator strictly avoids automatic cloud resource creation to adhere to least-privilege SOC guardrails. Cloud administrators must create the evidence bucket manually using the steps below.
+
+1. **Sign in to the AWS Management Console** and navigate to **Amazon S3** (`https://console.aws.amazon.com/s3/`).
+2. Click **Create bucket**.
+3. **Bucket Name**: Enter a globally unique name following your SOC naming convention (e.g., `secops-forensic-vault-<ACCOUNT_ID>-<REGION>`).
+4. **AWS Region**: Select the SOC designated region (e.g., `us-east-1`).
+5. **Block Public Access**:
+   * Ensure **Block *all* public access** is **checked** (all 4 checkboxes enabled).
+6. **Bucket Versioning**:
+   * Select **Enable** (required for S3 Object Lock WORM protection).
+7. **Default Encryption**:
+   * Encryption type: **Server-side encryption with Amazon S3 managed keys (SSE-S3)** or **AWS KMS (SSE-KMS)**.
+   * Bucket Key: **Enable**.
+8. **Object Lock (WORM)**:
+   * Expand **Advanced settings**, check **Enable Object Lock**, and acknowledge the prompt.
+9. Click **Create bucket**.
+
+---
+
+## 3. Required Configuration Options
+
+Configure these variables in your local `.env` (refer to `.env.example`):
+
+| Variable | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `S3_MOCK_MODE` | Boolean | `true` | When `true`, simulates S3 uploads and SHA-256 validation offline without AWS credentials. |
+| `AWS_S3_BUCKET_NAME` | String | `mock-forensic-evidence-bucket` | Target AWS S3 bucket name for forensic evidence archiving. |
+| `AWS_REGION` | String | `us-east-1` | AWS Region where the evidence vault bucket is located. |
+| `S3_EVIDENCE_PREFIX` | String | `incidents` | Root object key prefix for organizing incident evidence. |
+| `AWS_SERVER_SIDE_ENCRYPTION` | Enum | `AES256` | Encryption standard: `AES256` (SSE-S3) or `aws:kms` (SSE-KMS). |
+| `AWS_KMS_KEY_ID` | String / ARN | (empty) | Customer-managed KMS key ARN if using `aws:kms`. |
+| `AWS_PROFILE` | String | (empty) | Named AWS CLI profile (optional; defaults to standard IAM credential provider chain). |
+
+---
+
+## 4. Least-Privilege IAM Policy
+
+Attach the following policy to the Orchestrator's execution role (`ForensicEvidenceUploaderRole`):
+
+```json
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "AllowEvidenceBucketLocation",
+            "Effect": "Allow",
+            "Action": [
+                "s3:GetBucketLocation",
+                "s3:ListBucket"
+            ],
+            "Resource": "arn:aws:s3:::secops-forensic-vault-*"
+        },
+        {
+            "Sid": "AllowEvidenceUploadAndVerify",
+            "Effect": "Allow",
+            "Action": [
+                "s3:PutObject",
+                "s3:GetObject",
+                "s3:GetObjectAttributes"
+            ],
+            "Resource": "arn:aws:s3:::secops-forensic-vault-*/incidents/*"
+        },
+        {
+            "Sid": "ExplicitDenyEvidenceDeletionAndTampering",
+            "Effect": "Deny",
+            "Action": [
+                "s3:DeleteObject",
+                "s3:DeleteObjectVersion",
+                "s3:BypassGovernanceRetention",
+                "s3:PutObjectRetention",
+                "s3:PutBucketObjectLockConfiguration"
+            ],
+            "Resource": [
+                "arn:aws:s3:::secops-forensic-vault-*",
+                "arn:aws:s3:::secops-forensic-vault-*/*"
+            ]
+        }
+    ]
+}
+```
+
+---
+
+## 5. S3 Encryption and Object Lock (WORM) Setup
+
+Write-Once-Read-Many (WORM) storage is legally required to guarantee digital chain of custody under Federal Rules of Evidence Rule 902(14) and ISO/IEC 27037:
+
+* **Retention Mode**: Use **COMPLIANCE** mode for forensic evidence vaults. Under Compliance mode, **no IAM user or AWS root account** can delete or overwrite evidence objects before the retention period expires.
+* **Default Retention Period**: Set to **365 Days** (1 Year) or **2555 Days** (7 Years) according to corporate data retention governance.
+* **Legal Hold**: Can be placed on specific evidence packages indefinitely during active court proceedings or law enforcement subpoenas.
+
+### Enabling Default Object Lock Retention via AWS CLI:
+```powershell
+aws s3api put-object-lock-configuration `
+    --bucket secops-forensic-vault-123456789012-us-east-1 `
+    --object-lock-configuration '{ "ObjectLockEnabled": "Enabled", "Rule": { "DefaultRetention": { "Mode": "COMPLIANCE", "Days": 365 } } }'
+```
+
+---
+
+## 6. Evidence Cryptographic Integrity Guarantee
+
+1. **Pre-Upload Cryptographic Hash**:
+   * Local evidence files are processed through streaming SHA-256 hashing (`calculate_file_sha256`), yielding a 64-character hexadecimal digest.
+2. **S3 Checksum Algorithm**:
+   * During upload, `ChecksumAlgorithm='SHA256'` and `ChecksumSHA256` Base64 digest are transmitted. Amazon S3 automatically validates data integrity upon ingestion.
+3. **Post-Upload Verification**:
+   * The orchestrator inspects `head_object` for `ChecksumSHA256` or downloads the object stream to compute and cross-verify the hash.
+4. **ETag Rule**:
+   * The application strictly **never treats an ETag as a SHA-256 checksum**, preventing false verification claims from MD5 or multipart hashes.
+
+---
+
+## 7. Mock-Mode Execution Commands
+
+Navigate to the orchestrator directory:
+```powershell
+cd "d:\ransomware response\ransomware-response-orchestrator"
+```
+
+### 1. Collect KAPE Evidence and Immediately Archive to AWS S3
+```powershell
+python app.py --mock --collect --incident 1002 --endpoint ISOLATED-HOST --upload-s3
+```
+
+### 2. Standalone S3 Archival of an Existing Collection Job
+```powershell
+python app.py --mock --upload-s3 --job <COLLECTION_JOB_ID>
+```
+
+### 3. Archive RAM Acquisition Workflow to S3
+```powershell
+python app.py --mock --collect --incident 1002 --endpoint ISOLATED-HOST --method RAM --upload-s3
+```
+
+### 4. Query Job Status with S3 Verification Details
+```powershell
+python app.py --mock --status <COLLECTION_JOB_ID>
+```
+
+### 5. List All Recorded Collections (Showing S3 Archive Status)
+```powershell
+python app.py --mock --list-collections
+```
+
+---
+
+## 8. Unit-Test Commands and Results
+
+Run the complete test suite across Day 1, Day 2, and Day 3:
+
+```powershell
+# Run all unit tests
+pytest -v
+
+# Run Day 3 S3 storage and integrity tests only
+pytest -v tests/test_s3_storage.py
+
+# Run Day 2 forensic collector tests
+pytest -v tests/test_collection_service.py tests/test_evidence_collector.py
+
+# Run Day 1 regression tests
+pytest -v tests/test_incidents.py
+```
+
+### Actual Test Results (73 passed in 2.01s):
+```text
+tests/test_collection_service.py ................                        [ 21%]
+tests/test_evidence_collector.py .................                       [ 45%]
+tests/test_incidents.py .....................                            [ 73%]
+tests/test_s3_storage.py::test_calculate_file_sha256_success PASSED      [ 75%]
+tests/test_s3_storage.py::test_calculate_file_sha256_missing_file_raises_error PASSED [ 76%]
+tests/test_s3_storage.py::test_sha256_hex_and_base64_conversion PASSED   [ 78%]
+tests/test_s3_storage.py::test_etag_is_not_treated_as_sha256 PASSED      [ 79%]
+tests/test_s3_storage.py::test_s3_config_missing_bucket_raises_in_live_mode PASSED [ 80%]
+tests/test_s3_storage.py::test_s3_config_masks_sensitive_values PASSED   [ 82%]
+tests/test_s3_storage.py::test_successful_mock_upload_file PASSED        [ 83%]
+tests/test_s3_storage.py::test_upload_missing_file_raises_filenotfound PASSED [ 84%]
+tests/test_s3_storage.py::test_aws_permission_failure PASSED             [ 86%]
+tests/test_s3_storage.py::test_aws_network_failure PASSED                [ 87%]
+tests/test_s3_storage.py::test_checksum_mismatch_raises_error PASSED     [ 89%]
+tests/test_s3_storage.py::test_upload_evidence_metadata PASSED           [ 90%]
+tests/test_s3_storage.py::test_archive_evidence_manifest_simulated_handling PASSED [ 91%]
+tests/test_s3_storage.py::test_archive_evidence_manifest_real_file PASSED [ 93%]
+tests/test_s3_storage.py::test_collection_service_archive_job_to_s3_integration PASSED [ 94%]
+tests/test_s3_storage.py::test_boto3_client_error_access_denied_mapping PASSED [ 95%]
+tests/test_s3_storage.py::test_boto3_client_error_no_such_bucket_mapping PASSED [ 97%]
+tests/test_s3_storage.py::test_boto3_endpoint_connection_error_mapping PASSED [ 98%]
+tests/test_s3_storage.py::test_moto_s3_upload_and_integrity_verification PASSED [100%]
+
+============================= 73 passed in 2.01s ==============================
+```
+
+---
+
+## 9. Example Output
+
+### Command: S3 Evidence Archival (Mock Mode)
+```powershell
+python app.py --mock --upload-s3 --job kape-9cb6447b95
+```
+
+### Terminal Output:
+```text
+================================================================================
+     AUTOMATED RANSOMWARE CONTAINMENT & INCIDENT RESPONSE ORCHESTRATOR
+ DAY 1: EDR LIVE RESPONSE | DAY 2: EVIDENCE COLLECTION | DAY 3: SECURE S3 STORAGE
+================================================================================
+
+[*] Archiving forensic evidence for job 'kape-9cb6447b95' to AWS S3...
+    [Notice: Running in MOCK S3 MODE - Safe simulated cloud storage]
+
+--------------------------------------------------------------------------------
+[*] AWS S3 EVIDENCE ARCHIVE MANIFEST: incidents/1002/evidence/kape-9cb6447b95/kape_ISOLATED-HOST.corp.contoso.com_kape-9cb.zip
+--------------------------------------------------------------------------------
+  S3 Bucket            : mock-forensic-evidence-bucket
+  Object Key           : incidents/1002/evidence/kape-9cb6447b95/kape_ISOLATED-HOST.corp.contoso.com_kape-9cb.zip
+  S3 URI               : s3://mock-forensic-evidence-bucket/incidents/1002/evidence/kape-9cb6447b95/kape_ISOLATED-HOST.corp.contoso.com_kape-9cb.zip
+  Local Artifact       : evidence/simulated/kape_ISOLATED-HOST.corp.contoso.com_20261026T152722Z_kape-9.zip
+  File Size            : 48234102 bytes
+  SHA-256 Checksum     : simulated-sha256-e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+  Integrity Verified   : YES (Cryptographically Verified)
+  Server-Side Encr.    : AES256
+  Version ID           : sim-v-feb08233
+  Metadata Key         : incidents/1002/evidence/kape-9cb6447b95/metadata.json
+  Uploaded At (UTC)    : 2026-10-26T15:27:32.257868+00:00
+  Simulation Indicator : SIMULATED S3 RUN (Non-production test)
+--------------------------------------------------------------------------------
+```
+
+---
+
+## 10. Known Limitations
+
+1. **Pre-Existing S3 Infrastructure**: Real S3 uploads require an existing S3 bucket with Object Lock enabled and appropriate IAM permissions. The orchestrator deliberately avoids automatic cloud resource creation.
+2. **Bandwidth Limitations on Massive Memory Dumps**: Uploading multi-gigabyte RAM images (e.g., 32 GB - 64 GB) over public internet can incur high transfer times; in live AWS deployments, utilizing an **S3 VPC Endpoint** (`com.amazonaws.<region>.s3`) and multipart streaming is required.
+3. **Cross-Region Replication**: Automated cross-region replication to a secondary compliance bucket will be addressed in Day 4.

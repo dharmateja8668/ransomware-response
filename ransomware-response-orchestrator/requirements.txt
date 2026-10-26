@@ -2,6 +2,10 @@
 requests>=2.31.0
 python-dotenv>=1.0.0
 
+# AWS S3 Forensic Storage
+boto3>=1.34.0
+
 # Testing and Mocking Framework
 pytest>=8.0.0
 pytest-mock>=3.12.0
+moto>=5.0.0

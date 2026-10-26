@@ -90,6 +90,16 @@ class EvidenceMetadata:
     file_hash_sha256: Optional[str] = None
     file_size_bytes: Optional[int] = None
     diagnostic_notes: Optional[str] = None
+    # Day 3: AWS S3 Cloud Storage Manifest Fields
+    s3_bucket: Optional[str] = None
+    s3_object_key: Optional[str] = None
+    s3_metadata_key: Optional[str] = None
+    s3_upload_status: Optional[str] = None  # None, NOT_UPLOADED, UPLOADED, VERIFIED, FAILED
+    s3_uploaded_at: Optional[str] = None
+    s3_checksum_sha256: Optional[str] = None
+    s3_checksum_verified: bool = False
+    s3_simulation_indicator: bool = True
+    s3_version_id: Optional[str] = None
 
     def __post_init__(self) -> None:
         # Normalize status to enum string if passed as enum
@@ -141,6 +151,42 @@ class EvidenceMetadata:
             self.error_details,
         )
 
+    def record_s3_upload(
+        self,
+        bucket: str,
+        object_key: str,
+        checksum_sha256: str,
+        checksum_verified: bool,
+        metadata_key: Optional[str] = None,
+        version_id: Optional[str] = None,
+        simulation: bool = True,
+    ) -> None:
+        """Records verified AWS S3 archive telemetry in the evidence manifest."""
+        self.s3_bucket = bucket
+        self.s3_object_key = object_key
+        self.s3_metadata_key = metadata_key
+        self.s3_uploaded_at = datetime.now(timezone.utc).isoformat()
+        self.s3_checksum_sha256 = checksum_sha256
+        self.s3_checksum_verified = checksum_verified
+        self.s3_version_id = version_id
+        self.s3_simulation_indicator = simulation
+        self.s3_upload_status = "VERIFIED" if checksum_verified else "UPLOADED"
+        logger.info(
+            "Recorded S3 archive for job %s: s3://%s/%s (Verified=%s, Simulation=%s)",
+            self.collection_job_id,
+            bucket,
+            object_key,
+            checksum_verified,
+            simulation,
+        )
+
+    def record_s3_failure(self, error_details: str) -> None:
+        """Records an S3 upload or checksum verification failure."""
+        self.s3_upload_status = "FAILED"
+        prefix = f"{self.error_details} | " if self.error_details else ""
+        self.error_details = f"{prefix}S3 Upload Error: {error_details}"
+        logger.error("S3 upload failed for job %s: %s", self.collection_job_id, error_details)
+
     def to_dict(self) -> Dict[str, Any]:
         """Converts metadata record to dictionary, ensuring no secrets are exposed."""
         data = asdict(self)
@@ -191,6 +237,15 @@ class EvidenceMetadata:
             "file_hash_sha256",
             "file_size_bytes",
             "diagnostic_notes",
+            "s3_bucket",
+            "s3_object_key",
+            "s3_metadata_key",
+            "s3_upload_status",
+            "s3_uploaded_at",
+            "s3_checksum_sha256",
+            "s3_checksum_verified",
+            "s3_simulation_indicator",
+            "s3_version_id",
         }
         filtered = {k: v for k, v in data.items() if k in known_keys}
         return cls(**filtered)

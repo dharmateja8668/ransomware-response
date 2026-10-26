@@ -71,6 +71,7 @@ class ForensicCollectionService:
         self,
         defender_client: Optional[DefenderClient] = None,
         evidence_dir: Optional[Path | str] = None,
+        s3_storage_service: Optional[Any] = None,
     ) -> None:
         self.client = defender_client or DefenderClient()
 
@@ -85,6 +86,13 @@ class ForensicCollectionService:
                 self.evidence_dir = Path(__file__).resolve().parent.parent / "evidence" / "metadata"
 
         self.evidence_dir.mkdir(parents=True, exist_ok=True)
+
+        # Initialize S3 Storage Service
+        if s3_storage_service is not None:
+            self._s3_storage = s3_storage_service
+        else:
+            from storage.s3_storage import S3StorageService
+            self._s3_storage = S3StorageService()
 
         # Initialize adapters
         self.adapters: Dict[CollectionMethod, ForensicCollectorAdapter] = {
@@ -102,10 +110,16 @@ class ForensicCollectionService:
         self._load_existing_metadata()
 
         logger.info(
-            "Initialized ForensicCollectionService (evidence_dir=%s, mock_mode=%s)",
+            "Initialized ForensicCollectionService (evidence_dir=%s, mock_mode=%s, s3_bucket=%s)",
             self.evidence_dir,
             self.client.config.mock_mode,
+            self._s3_storage.config.bucket_name,
         )
+
+    @property
+    def s3_storage(self) -> Any:
+        """Returns the configured S3StorageService instance."""
+        return self._s3_storage
 
     def _load_existing_metadata(self) -> None:
         """Loads previously persisted metadata files from evidence directory."""
@@ -271,6 +285,7 @@ class ForensicCollectionService:
         artifact_categories: Optional[List[str]] = None,
         options: Optional[Dict[str, Any]] = None,
         allow_duplicate: bool = False,
+        upload_to_s3: bool = False,
     ) -> EvidenceMetadata:
         """
         Orchestrates authorized evidence collection on an endpoint.
@@ -280,6 +295,7 @@ class ForensicCollectionService:
           2. Idempotency Check: Refuse or return existing active job if duplicate.
           3. Adapter Dispatch: Delegate to method adapter (KAPE, RAM, etc.).
           4. Metadata Record: Save and audit metadata manifest.
+          5. Optional S3 Archival: Upload artifact and companion metadata to S3.
 
         Returns:
           EvidenceMetadata tracking the collection job.
@@ -329,6 +345,17 @@ class ForensicCollectionService:
         if metadata.status in (CollectionStatus.PENDING.value, CollectionStatus.RUNNING.value):
             self._active_dedup_index[dedup_key] = metadata.collection_job_id
 
+        # Step 5: Optional S3 Archival
+        if upload_to_s3 and metadata.status == CollectionStatus.COMPLETED.value:
+            try:
+                self._s3_storage.archive_evidence_manifest(
+                    evidence_metadata=metadata,
+                    evidence_dir=self.evidence_dir,
+                )
+            except Exception as err:
+                logger.error("Failed to archive job %s to S3 during initiation: %s", metadata.collection_job_id, err)
+                metadata.record_s3_failure(str(err))
+
         metadata.save(self.evidence_dir)
 
         logger.info(
@@ -338,6 +365,28 @@ class ForensicCollectionService:
             metadata.collection_method,
         )
         return metadata
+
+    def archive_job_to_s3(
+        self,
+        job_id: str,
+        verify_checksum: bool = True,
+    ) -> Any:
+        """
+        Archives a completed forensic collection job's evidence artifact and metadata manifest to AWS S3.
+        """
+        metadata = self.get_collection_status(job_id)
+        if metadata.status not in (CollectionStatus.COMPLETED.value, CollectionStatus.FAILED.value):
+            raise ForensicError(
+                f"Cannot archive job '{job_id}' in state [{metadata.status}]. Job must reach a terminal state first."
+            )
+
+        upload_result = self._s3_storage.archive_evidence_manifest(
+            evidence_metadata=metadata,
+            verify_checksum=verify_checksum,
+            evidence_dir=self.evidence_dir,
+        )
+        self._jobs[metadata.collection_job_id] = metadata
+        return upload_result
 
     # ─────────────────────────────────────────────────────────────────────────
     # Status Tracking & Polling

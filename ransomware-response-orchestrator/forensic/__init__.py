@@ -27,6 +27,17 @@ from forensic.evidence_collector import (
     UnsupportedMethodError,
 )
 from forensic.collection_service import ForensicCollectionService
+from storage.s3_storage import (
+    S3ChecksumMismatchError,
+    S3Config,
+    S3ConfigError,
+    S3FileNotFoundError,
+    S3NetworkError,
+    S3PermissionError,
+    S3StorageError,
+    S3StorageService,
+    UploadResult,
+)
 
 __all__ = [
     # Status & Method Enums
@@ -45,6 +56,13 @@ __all__ = [
     "UnsupportedMethodError",
     "DuplicateJobError",
     "CollectionJobError",
+    # S3 Exceptions
+    "S3StorageError",
+    "S3ConfigError",
+    "S3FileNotFoundError",
+    "S3PermissionError",
+    "S3NetworkError",
+    "S3ChecksumMismatchError",
     # Adapters
     "ForensicCollectorAdapter",
     "KapeCollectionAdapter",
@@ -52,4 +70,8 @@ __all__ = [
     "DefenderInvestigationPackageAdapter",
     # Core Service
     "ForensicCollectionService",
+    # S3 Storage
+    "S3Config",
+    "S3StorageService",
+    "UploadResult",
 ]

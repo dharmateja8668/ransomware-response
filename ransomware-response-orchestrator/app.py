@@ -5,6 +5,7 @@ app.py
 Automated Ransomware Containment & Incident Response Orchestrator
 Day 1: EDR Live Response Integration & Containment Verification
 Day 2: Automated Forensic Evidence Collection (KAPE, RAM, Investigation Package)
+Day 3: Secure AWS S3 Storage for Forensic Evidence & Cryptographic Verification
 
 Usage:
   # Day 1 Operations:
@@ -14,19 +15,23 @@ Usage:
   python app.py --test-auth                    # Test EDR authentication connectivity
   python app.py --mock                         # Force mock mode regardless of .env configuration
 
-  # Day 2 Forensic Evidence Collection Operations:
+  # Day 2 Forensic Evidence Collection:
   python app.py --collect --endpoint <NAME/ID> # Collect KAPE forensic evidence from contained endpoint
   python app.py --collect --endpoint <ID> --method RAM     # Acquire physical RAM memory image
   python app.py --collect --endpoint <ID> --method investigation_package # MDE native package
-  python app.py --collect --endpoint <ID> --artifacts Registry,EventLogs,Execution # Specific categories
   python app.py --status <JOB_ID>              # Check status of an evidence collection job
   python app.py --list-collections             # List all tracked evidence collection jobs
-  python app.py --collect --endpoint <ID> --wait # Wait and poll until collection completes
+
+  # Day 3 AWS S3 Storage & Archival:
+  python app.py --upload-s3 --job <JOB_ID>     # Upload and verify evidence artifact in AWS S3
+  python app.py --collect --endpoint <ID> --incident 1002 --upload-s3 # Collect and auto-archive to S3
+  python app.py --upload-s3 --job <JOB_ID> --s3-bucket my-evidence-bucket # Override bucket
 
 Security Notes:
   - Evidence collection is REFUSED unless endpoint containment status is confirmed ISOLATED.
-  - Endpoint must belong to the specified incident.
-  - Access tokens, client secrets, and passwords are fully redacted from logs and manifests.
+  - S3 uploads enforce SHA-256 integrity verification (never treats ETag as SHA-256).
+  - Server-Side Encryption (SSE-S3 AES256 or SSE-KMS) is mandatory for S3 storage.
+  - Access tokens, client secrets, and AWS credentials are fully redacted from logs and manifests.
   - Mock mode clearly flags simulated artifacts (simulation_indicator=True).
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
@@ -90,6 +95,17 @@ from forensic.evidence_collector import (
     UnsupportedMethodError,
 )
 from forensic.collection_service import ForensicCollectionService
+from storage.s3_storage import (
+    S3ChecksumMismatchError,
+    S3Config,
+    S3ConfigError,
+    S3FileNotFoundError,
+    S3NetworkError,
+    S3PermissionError,
+    S3StorageError,
+    S3StorageService,
+    UploadResult,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -153,7 +169,7 @@ def setup_logging(log_level_str: str = "INFO") -> logging.Logger:
 BANNER = """
 ================================================================================
      AUTOMATED RANSOMWARE CONTAINMENT & INCIDENT RESPONSE ORCHESTRATOR
-         DAY 1: EDR LIVE RESPONSE | DAY 2: FORENSIC EVIDENCE COLLECTION
+ DAY 1: EDR LIVE RESPONSE | DAY 2: EVIDENCE COLLECTION | DAY 3: SECURE S3 STORAGE
 ================================================================================
 """
 
@@ -243,10 +259,43 @@ def print_forensic_collection(meta: EvidenceMetadata) -> None:
     print(f"  SHA-256 Hash         : {meta.file_hash_sha256 or 'N/A'}")
     print(f"  Simulation Indicator : {'SIMULATED RUN (Non-production test)' if meta.simulation_indicator else 'LIVE EDR ACQUISITION'}")
     print(f"  Containment Verified : {'YES (Endpoint confirmed ISOLATED)' if meta.containment_verified else 'NO'}")
+
+    # Day 3: S3 Storage Fields
+    if meta.s3_object_key:
+        print(f"  S3 Bucket            : {meta.s3_bucket}")
+        print(f"  S3 Object Key        : {meta.s3_object_key}")
+        print(f"  S3 URI               : s3://{meta.s3_bucket}/{meta.s3_object_key}")
+        print(f"  S3 Metadata Key      : {meta.s3_metadata_key or 'N/A'}")
+        print(f"  S3 Upload Status     : [{meta.s3_upload_status}]")
+        print(f"  S3 Checksum Verified : {'YES (SHA-256 Verified)' if meta.s3_checksum_verified else 'NO'}")
+        if meta.s3_version_id:
+            print(f"  S3 Version ID        : {meta.s3_version_id}")
+
     if meta.error_details:
         print(f"  Error Details        : {meta.error_details}")
     if meta.diagnostic_notes:
         print(f"  Diagnostic Notes     : {meta.diagnostic_notes}")
+    print(border + "\n")
+
+
+def print_s3_upload(res: UploadResult) -> None:
+    """Renders a structured, readable S3 evidence archive manifest."""
+    border = "-" * 80
+    print("\n" + border)
+    print(f"[*] AWS S3 EVIDENCE ARCHIVE MANIFEST: {res.object_key}")
+    print(border)
+    print(f"  S3 Bucket            : {res.bucket}")
+    print(f"  Object Key           : {res.object_key}")
+    print(f"  S3 URI               : {res.s3_uri}")
+    print(f"  Local Artifact       : {res.local_path or 'N/A'}")
+    print(f"  File Size            : {res.file_size_bytes} bytes")
+    print(f"  SHA-256 Checksum     : {res.sha256_checksum}")
+    print(f"  Integrity Verified   : {'YES (Cryptographically Verified)' if res.checksum_verified else 'NO'}")
+    print(f"  Server-Side Encr.    : {res.server_side_encryption}")
+    print(f"  Version ID           : {res.version_id or 'Disabled / Unversioned'}")
+    print(f"  Metadata Key         : {res.metadata_key or 'N/A'}")
+    print(f"  Uploaded At (UTC)    : {res.uploaded_at}")
+    print(f"  Simulation Indicator : {'SIMULATED S3 RUN (Non-production test)' if res.simulation_indicator else 'LIVE AWS S3 STORAGE'}")
     print(border + "\n")
 
 
@@ -261,13 +310,16 @@ def print_collections_list(jobs: List[EvidenceMetadata]) -> None:
     else:
         for idx, job in enumerate(jobs, 1):
             sim_flag = "[SIMULATED]" if job.simulation_indicator else "[LIVE]"
-            print(f"  [{idx}] Job ID    : {job.collection_job_id} {sim_flag}")
+            s3_flag = f"[S3: {job.s3_upload_status}]" if job.s3_upload_status else "[S3: None]"
+            print(f"  [{idx}] Job ID    : {job.collection_job_id} {sim_flag} {s3_flag}")
             print(f"      Incident  : #{job.incident_id}")
             print(f"      Endpoint  : {job.hostname or job.endpoint_id}")
             print(f"      Method    : {job.collection_method}")
             print(f"      Status    : [{job.status}]")
             print(f"      Requested : {job.requested_at}")
             print(f"      Artifact  : {job.artifact_location or 'N/A'}")
+            if job.s3_object_key:
+                print(f"      S3 URI    : s3://{job.s3_bucket}/{job.s3_object_key}")
             if job.error_details:
                 print(f"      Error     : {job.error_details}")
     print(border + "\n")
@@ -279,7 +331,7 @@ def print_collections_list(jobs: List[EvidenceMetadata]) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Automated Ransomware Containment & Incident Response Orchestrator - Day 1 & Day 2"
+        description="Automated Ransomware Containment & Incident Response Orchestrator - Days 1, 2, and 3"
     )
     # Common Options
     parser.add_argument(
@@ -302,7 +354,7 @@ def main() -> int:
     parser.add_argument(
         "--mock",
         action="store_true",
-        help="Force mock mode execution without requiring real EDR API credentials",
+        help="Force mock mode execution without requiring real EDR API or AWS credentials",
     )
     parser.add_argument(
         "--json",
@@ -345,6 +397,25 @@ def main() -> int:
         help="Wait and poll for collection job completion before exiting",
     )
 
+    # Day 3: AWS S3 Cloud Storage Options
+    parser.add_argument(
+        "--upload-s3",
+        action="store_true",
+        help="Upload evidence artifact and manifest to AWS S3 storage",
+    )
+    parser.add_argument(
+        "--job",
+        type=str,
+        default=None,
+        help="Specific collection job ID to archive to S3",
+    )
+    parser.add_argument(
+        "--s3-bucket",
+        type=str,
+        default=None,
+        help="Override AWS S3 bucket name for evidence archiving",
+    )
+
     args = parser.parse_args()
 
     # Determine logging level from environment
@@ -356,7 +427,11 @@ def main() -> int:
     # Initialize configuration
     try:
         config = EDRConfig(mock_mode=True if args.mock else None)
-    except EDRConfigError as err:
+        s3_config = S3Config(
+            bucket_name=args.s3_bucket,
+            mock_mode=True if args.mock else None,
+        )
+    except (EDRConfigError, S3ConfigError) as err:
         logger.error("Configuration Error: %s", err)
         print(f"\n[!] Configuration Error: {err}")
         print("[!] To run without credentials, pass --mock or set EDR_MOCK_MODE=true in .env.\n")
@@ -364,7 +439,11 @@ def main() -> int:
 
     client = DefenderClient(config)
     incident_service = IncidentService(client)
-    forensic_service = ForensicCollectionService(client)
+    s3_service = S3StorageService(s3_config)
+    forensic_service = ForensicCollectionService(
+        defender_client=client,
+        s3_storage_service=s3_service,
+    )
 
     # 1. Test Authentication Mode
     if args.test_auth:
@@ -383,7 +462,45 @@ def main() -> int:
             print(f"[-] EDR Connection/Network Error: {err}")
             return 3
 
-    # 2. Forensic Job Status Query
+    # 2. Standalone AWS S3 Archival Mode
+    if args.upload_s3 and not args.collect:
+        target_job = args.job or args.status
+        if not target_job:
+            print("[-] Error: Please specify target job ID to archive via --job <JOB_ID> or --status <JOB_ID>.")
+            return 1
+
+        print(f"[*] Archiving forensic evidence for job '{target_job}' to AWS S3...")
+        if s3_config.mock_mode:
+            print("    [Notice: Running in MOCK S3 MODE - Safe simulated cloud storage]")
+
+        try:
+            res = forensic_service.archive_job_to_s3(target_job)
+            if args.json:
+                print(json.dumps(res.to_dict(), indent=2))
+            else:
+                print_s3_upload(res)
+            return 0
+        except S3FileNotFoundError as err:
+            print(f"[-] Local Evidence File Missing: {err}")
+            return 1
+        except S3PermissionError as err:
+            print(f"[-] AWS S3 Permission Denied: {err}")
+            return 2
+        except S3NetworkError as err:
+            print(f"[-] AWS S3 Network Error: {err}")
+            return 3
+        except S3ChecksumMismatchError as err:
+            print(f"[-] Cryptographic Integrity Check Failed: {err}")
+            return 4
+        except KeyError:
+            print(f"[-] Collection job '{target_job}' was not found.")
+            return 1
+        except Exception as err:
+            logger.exception("S3 upload failed for job %s: %s", target_job, err)
+            print(f"[-] S3 Archival Failed: {err}")
+            return 1
+
+    # 3. Forensic Job Status Query
     if args.status:
         job_id = args.status.strip()
         print(f"[*] Querying status for collection job: {job_id}")
@@ -407,7 +524,7 @@ def main() -> int:
             print(f"[-] Error querying collection job: {err}")
             return 1
 
-    # 3. List All Forensic Collections
+    # 4. List All Forensic Collections
     if args.list_collections:
         print("[*] Listing recorded forensic evidence collection jobs...")
         jobs = forensic_service.list_jobs(incident_id=args.incident, endpoint_id=args.endpoint)
@@ -417,13 +534,12 @@ def main() -> int:
             print_collections_list(jobs)
         return 0
 
-    # 4. Initiate Forensic Evidence Collection
+    # 5. Initiate Forensic Evidence Collection
     if args.collect:
         target_incident = args.incident or "1001"
         target_endpoint = args.endpoint
 
         if not target_endpoint:
-            # Attempt to resolve first affected device from incident
             print(f"[*] Target endpoint not specified. Inspecting Incident #{target_incident} for affected devices...")
             try:
                 inc_data = client.get_incident(target_incident)
@@ -438,7 +554,6 @@ def main() -> int:
                 print(f"[-] Error retrieving incident #{target_incident}: {err}")
                 return 1
 
-        # Parse requested categories if provided
         cat_list = None
         if args.artifacts:
             cat_list = [c.strip() for c in args.artifacts.split(",") if c.strip()]
@@ -448,6 +563,8 @@ def main() -> int:
         print(f"    Endpoint    : {target_endpoint}")
         print(f"    Method      : {args.method.upper()}")
         print(f"    Categories  : {cat_list or 'Default Profile'}")
+        if args.upload_s3:
+            print(f"    S3 Archival : Enabled (Bucket: {s3_config.bucket_name})")
         if config.mock_mode:
             print("    [Notice: Running in MOCK MODE - Safe non-production simulated collection]")
 
@@ -457,12 +574,18 @@ def main() -> int:
                 endpoint_identifier=target_endpoint,
                 method=args.method,
                 artifact_categories=cat_list,
+                upload_to_s3=args.upload_s3,
             )
 
             # If --wait was requested and job is still running, poll until complete
             if args.wait and metadata.status in (CollectionStatus.PENDING.value, CollectionStatus.RUNNING.value):
                 print(f"    [Polling job {metadata.collection_job_id} until completion...]")
                 metadata = forensic_service.track_job(metadata.collection_job_id)
+
+                # If S3 upload was requested and job completed during tracking
+                if args.upload_s3 and metadata.status == CollectionStatus.COMPLETED.value and not metadata.s3_object_key:
+                    forensic_service.archive_job_to_s3(metadata.collection_job_id)
+                    metadata = forensic_service.get_collection_status(metadata.collection_job_id)
 
             if args.json:
                 print(metadata.to_json(indent=2))
@@ -510,7 +633,7 @@ def main() -> int:
             print(f"[-] Unexpected failure: {err}")
             return 99
 
-    # 5. Standalone Endpoint Containment Verification (Day 1)
+    # 6. Standalone Endpoint Containment Verification (Day 1)
     if args.endpoint:
         print(f"[*] Querying containment status for endpoint: {args.endpoint}")
         try:
@@ -525,7 +648,7 @@ def main() -> int:
             print(f"[-] Error querying endpoint '{args.endpoint}': {err}")
             return 1
 
-    # 6. Incident Investigation Workflow (Day 1 Targeted or Demo)
+    # 7. Incident Investigation Workflow (Day 1 Targeted or Demo)
     target_incident = args.incident or "1001"
     print(f"[*] Initiating Incident Triage for Incident ID: {target_incident}")
     if config.mock_mode:

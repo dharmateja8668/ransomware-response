@@ -83,7 +83,7 @@ class OrchestratorPipeline:
         self.incident_service = incident_service or IncidentService(self.defender_client)
         self.collection_service = collection_service or ForensicCollectionService(
             defender_client=self.defender_client,
-            s3_service=s3_service,
+            s3_storage_service=s3_service,
         )
         self.s3_service = s3_service
         self.catalog_service = catalog_service or EvidenceCatalogService()
@@ -127,44 +127,46 @@ class OrchestratorPipeline:
             return report
 
         # Stage 2: Forensic Collection (Day 2)
-        collected_jobs = []
+        # Note: initiate_collection returns EvidenceMetadata directly.
+        collected_metadata: List["EvidenceMetadata"] = []  # type: ignore[name-defined]
         is_simulation = False
         for device_name in triage_report.affected_devices:
             for c_type in collection_types:
                 try:
-                    job = self.collection_service.initiate_collection(
+                    meta = self.collection_service.initiate_collection(
                         incident_id=incident_id,
-                        device_name=device_name,
-                        collection_type=c_type,
+                        endpoint_identifier=device_name,
+                        method=c_type,
                         upload_to_s3=upload_to_s3,
                     )
-                    collected_jobs.append(job)
-                    if job.metadata.simulation_indicator:
+                    collected_metadata.append(meta)
+                    if meta.simulation_indicator:
                         is_simulation = True
                 except Exception as exc:
                     msg = f"Stage 2 Collection failed ({device_name}, {c_type}): {exc}"
                     logger.warning(msg)
                     report.errors.append(msg)
 
-        report.collected_jobs_count = len(collected_jobs)
+        report.collected_jobs_count = len(collected_metadata)
         report.simulation_indicator = is_simulation
-        logger.info(f"[Stage 2] Completed {len(collected_jobs)} collection jobs.")
+        logger.info(f"[Stage 2] Completed {len(collected_metadata)} collection jobs.")
 
         # Stage 3: S3 Archival Count (Day 3)
         s3_success_count = sum(
-            1 for j in collected_jobs if j.metadata.s3_upload_status in {"SUCCESS", "MOCK_SUCCESS"}
+            1 for m in collected_metadata
+            if m.s3_upload_status in {"SUCCESS", "MOCK_SUCCESS", "UPLOADED", "VERIFIED"}
         )
         report.s3_uploaded_count = s3_success_count
         logger.info(f"[Stage 3] Evidence uploaded to S3: {s3_success_count} artifacts.")
 
         # Stage 4: Index into SQLite Catalog (Day 4)
         catalog_records: List[CatalogRecord] = []
-        for job in collected_jobs:
+        for meta in collected_metadata:
             try:
-                rec = self.catalog_service.index_evidence_metadata(job.metadata)
+                rec = self.catalog_service.index_evidence_metadata(meta)
                 catalog_records.append(rec)
             except Exception as exc:
-                msg = f"Stage 4 Catalog Indexing failed for {job.evidence_id}: {exc}"
+                msg = f"Stage 4 Catalog Indexing failed for {meta.collection_job_id}: {exc}"
                 logger.warning(msg)
                 report.errors.append(msg)
 
@@ -173,19 +175,19 @@ class OrchestratorPipeline:
 
         # Stage 5: Forensic Artifact Analysis (Day 4)
         analysis_reports: List[ArtifactAnalysisReport] = []
-        for job in collected_jobs:
+        for meta in collected_metadata:
             try:
-                fpath = job.metadata.file_path or ""
+                fpath = meta.artifact_location or ""
                 ana_rep = self.analyzer.analyze_evidence_file(
                     file_path=fpath,
-                    evidence_id=job.evidence_id,
+                    evidence_id=meta.collection_job_id,
                     incident_id=incident_id,
-                    evidence_type=job.collection_type,
-                    simulation_indicator=job.metadata.simulation_indicator,
+                    evidence_type=meta.collection_method,
+                    simulation_indicator=meta.simulation_indicator,
                 )
                 analysis_reports.append(ana_rep)
             except Exception as exc:
-                msg = f"Stage 5 Artifact Analysis failed for {job.evidence_id}: {exc}"
+                msg = f"Stage 5 Artifact Analysis failed for {meta.collection_job_id}: {exc}"
                 logger.warning(msg)
                 report.errors.append(msg)
 

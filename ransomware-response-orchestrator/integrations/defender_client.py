@@ -355,9 +355,93 @@ class DefenderClient:
         except RequestException as err:
             raise EDRAPIError(f"Request failed listing incidents: {err}") from err
 
+    def get_incident_alerts(self, incident_id: str | int) -> List[Dict[str, Any]]:
+        """
+        Retrieves alert telemetry associated with an incident for correlation analysis.
+
+        In mock mode, returns the alerts embedded in the mock incident response.
+        In live mode, queries Microsoft Defender for Endpoint alerts for the specified incident.
+
+        Official Endpoints:
+          GET https://api.securitycenter.microsoft.com/api/incidents/{id}/alerts
+          or GET https://api.securitycenter.microsoft.com/api/alerts?$filter=incidentId eq {id}
+
+        Args:
+            incident_id: The incident identifier.
+
+        Returns:
+            List of alert dictionaries (may be empty if no alerts are found).
+        """
+        incident_id_str = str(incident_id).strip()
+        if not incident_id_str:
+            raise ValueError("Incident ID cannot be empty.")
+
+        logger.info("Retrieving alert telemetry for incident ID: %s", incident_id_str)
+
+        if self.config.mock_mode:
+            incident_data = self.get_incident(incident_id_str)
+            raw_alerts = incident_data.get("raw_data", {}).get("alerts")
+            if raw_alerts is not None:
+                alerts = raw_alerts
+            else:
+                alerts = incident_data.get("alerts", [])
+            logger.debug(
+                "Retrieved %d mock alerts for incident #%s",
+                len(alerts),
+                incident_id_str,
+            )
+            return alerts
+
+        url = f"{self.config.api_base_url}/api/incidents/{incident_id_str}/alerts"
+        headers = self._get_auth_headers()
+
+        try:
+            response = self._session.get(url, headers=headers, timeout=self.config.timeout_seconds)
+            if response.status_code == 404:
+                # Fallback to OData filter query on /api/alerts
+                filter_url = f"{self.config.api_base_url}/api/alerts?$filter=incidentId eq {incident_id_str}"
+                response = self._session.get(filter_url, headers=headers, timeout=self.config.timeout_seconds)
+        except Timeout as err:
+            logger.error("Timeout retrieving alerts for incident %s after %ds.", incident_id_str, self.config.timeout_seconds)
+            raise EDRTimeoutError(f"Timeout while retrieving alerts for incident {incident_id_str}: {err}") from err
+        except ConnectionError as err:
+            logger.error("Connection failure retrieving alerts for incident %s.", incident_id_str)
+            raise EDRConnectionError(f"Connection error while retrieving alerts for incident {incident_id_str}: {err}") from err
+        except RequestException as err:
+            raise EDRAPIError(f"Request failed for alerts of incident {incident_id_str}: {err}") from err
+
+        if response.status_code == 404:
+            logger.warning("No alerts found for incident %s in Defender API (HTTP 404).", incident_id_str)
+            return []
+
+        if response.status_code == 401:
+            logger.warning("Authentication token expired or rejected (HTTP 401). Retrying with refreshed token.")
+            self._access_token = None
+            headers = self._get_auth_headers()
+            try:
+                response = self._session.get(url, headers=headers, timeout=self.config.timeout_seconds)
+            except RequestException as err:
+                raise EDRAPIError(f"Request retry failed for alerts of incident {incident_id_str}: {err}") from err
+
+        if response.status_code != 200:
+            logger.error("Defender API returned HTTP %d for incident %s alerts.", response.status_code, incident_id_str)
+            raise EDRAPIError(
+                f"Failed to retrieve alerts for incident {incident_id_str} (HTTP {response.status_code}): {response.text}",
+                status_code=response.status_code,
+                response_body=response.text,
+            )
+
+        try:
+            data = response.json()
+            raw_list = data.get("value", []) if isinstance(data, dict) else data
+            return raw_list if isinstance(raw_list, list) else []
+        except Exception as err:
+            raise EDRAPIError(f"Invalid JSON returned for incident {incident_id_str} alerts: {err}") from err
+
     # ─────────────────────────────────────────────────────────────────────────
     # Task 4: Verify Endpoint Containment
     # ─────────────────────────────────────────────────────────────────────────
+
 
     def get_endpoint_containment_status(self, machine_id_or_name: str) -> Dict[str, Any]:
         """

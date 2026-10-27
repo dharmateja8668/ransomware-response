@@ -267,7 +267,7 @@ class ArtifactAnalyzer:
                         )
 
                     # Inspect content of text/log/manifest files inside archive
-                    if entry_path.suffix.lower() in {".txt", ".log", ".json", ".csv"}:
+                    if entry_path.suffix.lower() in {".txt", ".log", ".json", ".csv", ".evtx", ".xml"}:
                         try:
                             sample = zf.read(name)[:65536].decode("utf-8", errors="ignore")
                             self._scan_text_string(sample, report, evidence_ref=name)

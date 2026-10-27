@@ -420,15 +420,83 @@ def test_alert_correlator_low_threat_no_matches():
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_unified_orchestrator_pipeline_mock_run():
-    """Verifies the complete end-to-end IR lifecycle runs cleanly in mock mode."""
-    # Build in-memory pipeline
-    pipeline = OrchestratorPipeline()
-    # Ensure memory catalog is used so we don't write to disk during testing
+    """Verifies the complete end-to-end IR lifecycle runs cleanly in mock mode
+    using a fully mocked Defender client that allows authorized mock evidence collection.
+    Endpoint containment is verified as ISOLATED so the safety pre-check authorizes collection.
+    """
+    from integrations.defender_client import DefenderClient
+
+    mock_defender = MagicMock(spec=DefenderClient)
+    mock_defender.config = MagicMock()
+    mock_defender.config.mock_mode = True
+    mock_defender.config.api_base_url = "https://api.securitycenter.microsoft.com"
+
+    # Incident details for Stage 1 triage and Stage 2 authorization
+    mock_defender.get_incident.return_value = {
+        "incident_id": "1001",
+        "title": "Multi-stage Ransomware Activity Detected",
+        "severity": "High",
+        "status": "Active",
+        "affected_device_name": "FINANCE-SRV-01.corp.contoso.com",
+        "device_ip_address": "10.0.4.15",
+        "machine_id": "f489a71b-324e-4f01-92bb-187640df21a1",
+        "all_affected_devices": ["FINANCE-SRV-01.corp.contoso.com"],
+        "all_ip_addresses": ["10.0.4.15"],
+        "alerts_count": 1,
+        "alerts": [
+            {
+                "alert_id": "da-77821-alert-01",
+                "title": "Suspicious PowerShell command attempting shadow copy deletion (vssadmin)",
+                "category": "DefenseEvasion",
+                "severity": "High",
+                "machine_id": "f489a71b-324e-4f01-92bb-187640df21a1",
+                "device_name": "FINANCE-SRV-01.corp.contoso.com",
+                "ip_address": "10.0.4.15",
+            }
+        ],
+    }
+
+    # Endpoint containment status: confirmed ISOLATED to satisfy authorization checks
+    mock_defender.get_endpoint_containment_status.return_value = {
+        "device_id": "f489a71b-324e-4f01-92bb-187640df21a1",
+        "device_name": "FINANCE-SRV-01.corp.contoso.com",
+        "containment_status": "ISOLATED",
+        "isolation_details": "Isolated",
+        "risk_score": "High",
+        "health_status": "Active",
+        "last_ip_address": "10.0.4.15",
+        "verified_at": "2026-10-25T14:38:15Z",
+    }
+
+    # Live Response capability check (required by adapter prerequisite check)
+    mock_defender.check_live_response_capability.return_value = {
+        "supported": True,
+        "os_platform": "Windows10",
+        "os_version": "10.0.19045",
+        "live_response_configured": True,
+        "reason": None,
+    }
+
+    # Alert telemetry for Stage 6 correlation
+    mock_defender.get_incident_alerts.return_value = [
+        {
+            "id": "da-77821-alert-01",
+            "title": "Suspicious PowerShell command attempting shadow copy deletion (vssadmin)",
+            "severity": "High",
+            "machineId": "f489a71b-324e-4f01-92bb-187640df21a1",
+            "computerDnsName": "FINANCE-SRV-01.corp.contoso.com",
+            "evidence": [
+                {"processCommandLine": "vssadmin delete shadows /all /quiet"},
+            ],
+        }
+    ]
+
+    pipeline = OrchestratorPipeline(defender_client=mock_defender)
     pipeline.catalog_service = EvidenceCatalogService(db_path=":memory:")
 
     report = pipeline.run_full_workflow(
         incident_id="1001",
-        upload_to_s3=True,
+        upload_to_s3=False,
         collection_types=["KAPE"],
     )
 
@@ -441,6 +509,7 @@ def test_unified_orchestrator_pipeline_mock_run():
     assert report.analyzed_reports_count >= 1
     assert report.correlation_report is not None
     assert report.simulation_indicator is True
+    mock_defender.get_incident_alerts.assert_called_with("1001")
 
 
 def test_unified_orchestrator_pipeline_handles_invalid_incident():

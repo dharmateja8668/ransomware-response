@@ -106,6 +106,29 @@ from storage.s3_storage import (
     S3StorageService,
     UploadResult,
 )
+from services.evidence_catalog import (
+    CatalogRecord,
+    EvidenceCatalogError,
+    EvidenceCatalogService,
+    EvidenceIntegrityError,
+    EvidenceNotFoundError,
+    IntegrityCheckResult,
+)
+from analysis.artifact_analyzer import (
+    ArtifactAnalysisReport,
+    ArtifactAnalyzer,
+    IOCItem,
+    TriageFinding,
+)
+from analysis.alert_correlator import (
+    AlertCorrelator,
+    CorrelationReport,
+    MatchedIOC,
+)
+from services.orchestrator_pipeline import (
+    OrchestratorPipeline,
+    UnifiedWorkflowReport,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -325,6 +348,149 @@ def print_collections_list(jobs: List[EvidenceMetadata]) -> None:
     print(border + "\n")
 
 
+def print_catalog_record(rec: CatalogRecord) -> None:
+    """Renders a structured view of a single evidence catalog record."""
+    border = "-" * 80
+    print("\n" + border)
+    print(f"[*] SQLITE EVIDENCE CATALOG RECORD: {rec.evidence_id}")
+    print(border)
+    print(f"  Incident ID          : #{rec.incident_id}")
+    print(f"  Device Name / ID     : {rec.device_name} ({rec.device_id})")
+    print(f"  Evidence Type        : {rec.evidence_type}")
+    print(f"  File Name            : {rec.file_name}")
+    print(f"  File Path            : {rec.file_path}")
+    print(f"  File Size            : {rec.file_size_bytes} bytes")
+    print(f"  SHA-256 Hash         : {rec.sha256_hash}")
+    print(f"  S3 Archival Status   : [{rec.s3_upload_status or 'NOT_UPLOADED'}]")
+    if rec.s3_object_key:
+        print(f"  S3 URI               : s3://{rec.s3_bucket}/{rec.s3_object_key}")
+        print(f"  S3 Verified          : {'YES' if rec.s3_checksum_verified else 'NO'}")
+    print(f"  Simulation Indicator : {'SIMULATED TEST DATA' if rec.simulation_indicator else 'LIVE EVIDENCE'}")
+    print(f"  Collected At (UTC)   : {rec.collected_at}")
+    print(f"  Indexed At (UTC)     : {rec.indexed_at}")
+    print(border + "\n")
+
+
+def print_catalog_list(records: List[CatalogRecord]) -> None:
+    """Renders a summary table of evidence records in the SQLite catalog."""
+    border = "-" * 80
+    print("\n" + border)
+    print(f"[*] SQLITE EVIDENCE CATALOG ENTRIES ({len(records)}):")
+    print(border)
+    if not records:
+        print("  (No evidence catalog entries found)")
+    else:
+        for idx, rec in enumerate(records, 1):
+            sim_flag = "[SIMULATED]" if rec.simulation_indicator else "[LIVE]"
+            s3_flag = f"[S3: {rec.s3_upload_status}]" if rec.s3_upload_status else "[S3: None]"
+            print(f"  [{idx}] Evidence ID : {rec.evidence_id} {sim_flag} {s3_flag}")
+            print(f"      Incident    : #{rec.incident_id}")
+            print(f"      Device      : {rec.device_name} ({rec.device_id})")
+            print(f"      Type / File : {rec.evidence_type} -> {rec.file_name}")
+            print(f"      SHA-256     : {rec.sha256_hash[:16]}...{rec.sha256_hash[-8:]}")
+            print(f"      Indexed At  : {rec.indexed_at}")
+    print(border + "\n")
+
+
+def print_integrity_result(res: IntegrityCheckResult) -> None:
+    """Renders a cryptographic integrity verification result."""
+    border = "-" * 80
+    print("\n" + border)
+    status_str = "[VERIFIED / INTACT]" if res.is_valid else "[CORRUPTED / TAMPERED]"
+    print(f"[*] CRYPTOGRAPHIC INTEGRITY AUDIT: {res.evidence_id} {status_str}")
+    print(border)
+    print(f"  Target File Path     : {res.file_path}")
+    print(f"  Indexed Catalog Hash : {res.indexed_hash}")
+    print(f"  Recalculated Hash    : {res.recalculated_hash or 'FAILED_TO_CALCULATE'}")
+    print(f"  Integrity Status     : {'VALID / VERIFIED INTACT' if res.is_valid else 'INVALID / MISMATCH DETECTED'}")
+    print(f"  Verified At (UTC)    : {res.verified_at}")
+    if res.error_message:
+        print(f"  Audit Failure Detail : {res.error_message}")
+    print(border + "\n")
+
+
+def print_artifact_analysis(report: ArtifactAnalysisReport) -> None:
+    """Renders automated forensic artifact analysis findings and IOCs."""
+    border = "-" * 80
+    print("\n" + border)
+    threat_flag = "[RANSOMWARE DETECTED]" if report.ransomware_detected else "[NO RANSOMWARE SIGNATURE]"
+    print(f"[*] FORENSIC ARTIFACT ANALYSIS REPORT: {report.evidence_id} {threat_flag}")
+    print(border)
+    print(f"  Incident ID          : #{report.incident_id}")
+    print(f"  Evidence Type        : {report.evidence_type}")
+    print(f"  Artifact Path        : {report.file_path} ({report.file_size_bytes} bytes)")
+    print(f"  Ransomware Detected  : {'YES' if report.ransomware_detected else 'NO'}")
+    if report.suspected_ransomware_family:
+        print(f"  Suspected Family     : {report.suspected_ransomware_family}")
+    print(f"  Confidence Score     : {int(report.confidence_score * 100)}%")
+    print(f"  Summary Assessment   : {report.summary}")
+    print(f"  Simulation Indicator : {'SIMULATED' if report.simulation_indicator else 'LIVE'}")
+
+    print(f"\n  [Findings: {len(report.findings)}]")
+    for idx, f in enumerate(report.findings, 1):
+        print(f"    ({idx}) [{f.severity}] {f.title}")
+        print(f"        Detail : {f.description}")
+        print(f"        Ref    : {f.evidence_ref}")
+
+    print(f"\n  [Extracted IOCs: {len(report.extracted_iocs)}]")
+    for idx, ioc in enumerate(report.extracted_iocs, 1):
+        print(f"    ({idx}) [{ioc.ioc_type}] {ioc.value} ({ioc.severity})")
+        print(f"        Context: {ioc.context}")
+    print(border + "\n")
+
+
+def print_correlation_report(report: CorrelationReport) -> None:
+    """Renders cross-telemetry EDR and forensic correlation results."""
+    border = "-" * 80
+    print("\n" + border)
+    print(f"[*] EDR TELEMETRY & FORENSIC CORRELATION: Incident #{report.incident_id}")
+    print(border)
+    print(f"  Incident Title       : {report.incident_title}")
+    print(f"  Incident Severity    : {report.incident_severity}")
+    print(f"  Overall Threat Level : [{report.overall_threat_level}]")
+    print(f"  Correlation Score    : {report.correlation_score} / 100")
+    print(f"  Evidence Evaluated   : {report.evidence_items_evaluated} catalog items")
+    print(f"  Corroborating Matches: {report.matched_iocs_count} matched IOCs")
+    print(f"  Chain of Custody     : {'VERIFIED' if report.chain_of_custody_verified else 'COMPROMISED'}")
+    print(f"  Simulation Indicator : {'SIMULATED' if report.simulation_indicator else 'LIVE'}")
+    print(f"  Summary              : {report.summary}")
+
+    print(f"\n  [Matched IOC Telemetry ({len(report.matched_iocs)})]:")
+    for idx, m in enumerate(report.matched_iocs, 1):
+        print(f"    ({idx}) [{m.match_category}] {m.ioc_value} ({m.severity})")
+        print(f"        Alert   : {m.alert_title}")
+        print(f"        Details : {m.details}")
+
+    print(f"\n  [Containment Recommendations ({len(report.containment_recommendations)})]:")
+    for idx, r in enumerate(report.containment_recommendations, 1):
+        print(f"    [{idx}] {r}")
+    print(border + "\n")
+
+
+def print_pipeline_report(report: UnifiedWorkflowReport) -> None:
+    """Renders end-to-end incident response pipeline summary."""
+    border = "=" * 80
+    print("\n" + border)
+    print(f"[*] END-TO-END RANSOMWARE ORCHESTRATOR PIPELINE REPORT")
+    print(border)
+    print(f"  Incident ID          : #{report.incident_id}")
+    print(f"  Execution Status     : [{report.pipeline_status}]")
+    print(f"  Executed At (UTC)    : {report.executed_at}")
+    print(f"  Simulation Indicator : {'SIMULATED (Safe Demo Mode)' if report.simulation_indicator else 'LIVE PRODUCTION'}")
+    print(f"  Stage 1 Triage       : {'SUCCESS' if report.triage_report else 'FAILED'}")
+    print(f"  Stage 2 Collections  : {report.collected_jobs_count} jobs completed")
+    print(f"  Stage 3 S3 Archival  : {report.s3_uploaded_count} artifacts secured in S3")
+    print(f"  Stage 4 SQLite Index : {report.indexed_records_count} evidence records indexed")
+    print(f"  Stage 5 Artifact Triage: {report.analyzed_reports_count} analysis reports compiled")
+    if report.correlation_report:
+        print(f"  Stage 6 Correlation  : Threat [{report.correlation_report.overall_threat_level}], Score {report.correlation_report.correlation_score}/100")
+    if report.errors:
+        print(f"\n  [Pipeline Warnings/Errors ({len(report.errors)})]:")
+        for err in report.errors:
+            print(f"    [-] {err}")
+    print(border + "\n")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CLI Entry Point
 # ─────────────────────────────────────────────────────────────────────────────
@@ -416,6 +582,47 @@ def main() -> int:
         help="Override AWS S3 bucket name for evidence archiving",
     )
 
+    # Day 4: Evidence Cataloging, Verification, Analysis & Correlation Options
+    parser.add_argument(
+        "--full-workflow",
+        action="store_true",
+        help="Execute automated end-to-end Days 1-4 incident response lifecycle",
+    )
+    parser.add_argument(
+        "--index-job",
+        type=str,
+        default=None,
+        help="Index a completed forensic collection job ID into the SQLite evidence catalog",
+    )
+    parser.add_argument(
+        "--list-catalog",
+        action="store_true",
+        help="List all forensic evidence records from the SQLite catalog",
+    )
+    parser.add_argument(
+        "--search-catalog",
+        type=str,
+        default=None,
+        help="Search the evidence catalog by hostname, file name, or SHA-256 hash",
+    )
+    parser.add_argument(
+        "--verify-integrity",
+        type=str,
+        default=None,
+        help="Cryptographically verify local evidence file SHA-256 against catalog record",
+    )
+    parser.add_argument(
+        "--analyze-artifact",
+        type=str,
+        default=None,
+        help="Perform automated forensic triage or memory artifact analysis on file/evidence ID",
+    )
+    parser.add_argument(
+        "--correlate",
+        action="store_true",
+        help="Correlate Defender for Endpoint alerts with catalog evidence and artifact findings",
+    )
+
     args = parser.parse_args()
 
     # Determine logging level from environment
@@ -444,6 +651,156 @@ def main() -> int:
         defender_client=client,
         s3_storage_service=s3_service,
     )
+    catalog_service = EvidenceCatalogService()
+    artifact_analyzer = ArtifactAnalyzer()
+    alert_correlator = AlertCorrelator()
+    orchestrator_pipeline = OrchestratorPipeline(
+        defender_client=client,
+        incident_service=incident_service,
+        collection_service=forensic_service,
+        s3_service=s3_service,
+        catalog_service=catalog_service,
+        analyzer=artifact_analyzer,
+        correlator=alert_correlator,
+    )
+
+    # 0. End-to-End Orchestrator Pipeline (Days 1 - 4)
+    if args.full_workflow:
+        target_inc = args.incident or "1001"
+        print(f"[*] Executing End-to-End Orchestrator Pipeline for Incident #{target_inc}...")
+        if config.mock_mode:
+            print("    [Notice: Running in MOCK MODE - Safe non-production simulated pipeline]")
+        pipe_report = orchestrator_pipeline.run_full_workflow(
+            incident_id=target_inc,
+            upload_to_s3=args.upload_s3,
+        )
+        if args.json:
+            print(json.dumps(pipe_report.to_dict(), indent=2))
+        else:
+            print_pipeline_report(pipe_report)
+        return 0 if pipe_report.pipeline_status != "FAILED" else 1
+
+    # 0.1 SQLite Catalog Indexing
+    if args.index_job:
+        job_id = args.index_job.strip()
+        print(f"[*] Indexing forensic collection job '{job_id}' into SQLite catalog...")
+        try:
+            meta = forensic_service.get_collection_status(job_id)
+            rec = catalog_service.index_evidence_metadata(meta)
+            if args.json:
+                print(json.dumps(rec.to_dict(), indent=2))
+            else:
+                print_catalog_record(rec)
+            return 0
+        except KeyError:
+            print(f"[-] Collection job '{job_id}' not found.")
+            return 1
+        except Exception as err:
+            logger.exception("Failed to index job %s: %s", job_id, err)
+            print(f"[-] Indexing Failed: {err}")
+            return 1
+
+    # 0.2 List Catalog
+    if args.list_catalog:
+        print("[*] Retrieving evidence records from SQLite catalog...")
+        records = catalog_service.list_records()
+        if args.json:
+            print(json.dumps([r.to_dict() for r in records], indent=2))
+        else:
+            print_catalog_list(records)
+        return 0
+
+    # 0.3 Search Catalog
+    if args.search_catalog:
+        query = args.search_catalog.strip()
+        print(f"[*] Searching SQLite evidence catalog for: '{query}'...")
+        records = catalog_service.search(query=query, incident_id=args.incident)
+        if args.json:
+            print(json.dumps([r.to_dict() for r in records], indent=2))
+        else:
+            print_catalog_list(records)
+        return 0
+
+    # 0.4 Cryptographic Integrity Verification
+    if args.verify_integrity:
+        ev_id = args.verify_integrity.strip()
+        print(f"[*] Cryptographically verifying SHA-256 integrity for evidence ID: '{ev_id}'...")
+        res = catalog_service.verify_integrity(ev_id)
+        if args.json:
+            print(json.dumps(res.to_dict(), indent=2))
+        else:
+            print_integrity_result(res)
+        return 0 if res.is_valid else 1
+
+    # 0.5 Automated Forensic Artifact Analysis
+    if args.analyze_artifact:
+        target = args.analyze_artifact.strip()
+        print(f"[*] Running automated forensic artifact analysis on '{target}'...")
+        rec = catalog_service.get_record(target)
+        if rec:
+            file_target = rec.file_path
+            ev_id = rec.evidence_id
+            inc_id = rec.incident_id
+            ev_type = rec.evidence_type
+            sim = rec.simulation_indicator
+        else:
+            file_target = target
+            ev_id = Path(target).stem
+            inc_id = args.incident or "1001"
+            ev_type = "KAPE" if "kape" in target.lower() else ("RAM" if "ram" in target.lower() else "TRIAGE")
+            sim = True if config.mock_mode else False
+
+        res = artifact_analyzer.analyze_evidence_file(
+            file_path=file_target,
+            evidence_id=ev_id,
+            incident_id=inc_id,
+            evidence_type=ev_type,
+            simulation_indicator=sim,
+        )
+        if args.json:
+            print(json.dumps(res.to_dict(), indent=2))
+        else:
+            print_artifact_analysis(res)
+        return 0
+
+    # 0.6 EDR Alert Telemetry Correlation
+    if args.correlate:
+        target_inc = args.incident or "1001"
+        print(f"[*] Correlating EDR alerts with forensic findings for Incident #{target_inc}...")
+        try:
+            inc_report = incident_service.investigate_incident(target_inc)
+            raw_alerts = client.get_incident_alerts(target_inc)
+            records = catalog_service.find_by_incident(target_inc)
+            analysis_reps = []
+            for r in records:
+                if r.file_path and Path(r.file_path).exists():
+                    analysis_reps.append(
+                        artifact_analyzer.analyze_evidence_file(
+                            file_path=r.file_path,
+                            evidence_id=r.evidence_id,
+                            incident_id=target_inc,
+                            evidence_type=r.evidence_type,
+                            simulation_indicator=r.simulation_indicator,
+                        )
+                    )
+            corr = alert_correlator.correlate(
+                incident_id=target_inc,
+                incident_title=inc_report.title,
+                incident_severity=inc_report.severity,
+                edr_alerts=raw_alerts,
+                catalog_records=records,
+                analysis_reports=analysis_reps,
+                simulation_indicator=config.mock_mode,
+            )
+            if args.json:
+                print(json.dumps(corr.to_dict(), indent=2))
+            else:
+                print_correlation_report(corr)
+            return 0
+        except Exception as err:
+            logger.exception("Correlation failed for incident %s: %s", target_inc, err)
+            print(f"[-] Correlation Failed: {err}")
+            return 1
 
     # 1. Test Authentication Mode
     if args.test_auth:

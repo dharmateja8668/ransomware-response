@@ -72,8 +72,10 @@ class ForensicCollectionService:
         defender_client: Optional[DefenderClient] = None,
         evidence_dir: Optional[Path | str] = None,
         s3_storage_service: Optional[Any] = None,
+        audit_service: Optional[Any] = None,
     ) -> None:
         self.client = defender_client or DefenderClient()
+        self.audit_service = audit_service
 
         # Determine evidence storage directory
         if evidence_dir:
@@ -331,19 +333,87 @@ class ForensicCollectionService:
             incident_id,
         )
 
+        if self.audit_service:
+            self.audit_service.record_event(
+                action="COLLECTION_REQUESTED",
+                incident_id=str(incident_id),
+                endpoint_id=canonical_id,
+                actor="ForensicCollectionService",
+                details={"method": method_str},
+            )
+            self.audit_service.record_event(
+                action="COLLECTION_STARTED",
+                incident_id=str(incident_id),
+                endpoint_id=canonical_id,
+                actor="ForensicCollectionService",
+                details={"method": method_str},
+            )
+
         # Step 3: Initiate collection via adapter
-        metadata = adapter.initiate(
-            incident_id=str(incident_id),
-            endpoint_id=canonical_id,
-            hostname=canonical_host,
-            artifact_categories=artifact_categories,
-            options=options,
-        )
+        try:
+            metadata = adapter.initiate(
+                incident_id=str(incident_id),
+                endpoint_id=canonical_id,
+                hostname=canonical_host,
+                artifact_categories=artifact_categories,
+                options=options,
+            )
+        except Exception as exc:
+            if self.audit_service:
+                self.audit_service.record_event(
+                    action="COLLECTION_FAILED",
+                    status="FAILURE",
+                    incident_id=str(incident_id),
+                    endpoint_id=canonical_id,
+                    actor="ForensicCollectionService",
+                    details={"error": str(exc), "method": method_str},
+                )
+            raise
 
         # Step 4: Register and persist metadata
         self._jobs[metadata.collection_job_id] = metadata
         if metadata.status in (CollectionStatus.PENDING.value, CollectionStatus.RUNNING.value):
             self._active_dedup_index[dedup_key] = metadata.collection_job_id
+
+        exec_mode = "MOCK" if metadata.simulation_indicator else "REAL"
+
+        if metadata.status == CollectionStatus.COMPLETED.value:
+            if self.audit_service:
+                self.audit_service.record_event(
+                    action="COLLECTION_COMPLETED",
+                    status="SUCCESS",
+                    incident_id=str(incident_id),
+                    evidence_id=metadata.collection_job_id,
+                    endpoint_id=canonical_id,
+                    actor="ForensicCollectionService",
+                    evidence_hash=metadata.file_hash_sha256,
+                    source_location=metadata.artifact_location,
+                    execution_mode=exec_mode,
+                    details={"method": metadata.collection_method},
+                )
+                if metadata.file_hash_sha256:
+                    self.audit_service.record_event(
+                        action="HASH_CALCULATED",
+                        status="SUCCESS",
+                        incident_id=str(incident_id),
+                        evidence_id=metadata.collection_job_id,
+                        endpoint_id=canonical_id,
+                        actor="ForensicCollectionService",
+                        evidence_hash=metadata.file_hash_sha256,
+                        execution_mode=exec_mode,
+                    )
+        elif metadata.status == CollectionStatus.FAILED.value:
+            if self.audit_service:
+                self.audit_service.record_event(
+                    action="COLLECTION_FAILED",
+                    status="FAILURE",
+                    incident_id=str(incident_id),
+                    evidence_id=metadata.collection_job_id,
+                    endpoint_id=canonical_id,
+                    actor="ForensicCollectionService",
+                    execution_mode=exec_mode,
+                    details={"error": metadata.error_details},
+                )
 
         # Step 5: Optional S3 Archival
         if upload_to_s3 and metadata.status == CollectionStatus.COMPLETED.value:
@@ -352,9 +422,33 @@ class ForensicCollectionService:
                     evidence_metadata=metadata,
                     evidence_dir=self.evidence_dir,
                 )
+                if self.audit_service and metadata.s3_upload_status in {"SUCCESS", "MOCK_SUCCESS", "UPLOADED", "VERIFIED"}:
+                    self.audit_service.record_event(
+                        action="S3_UPLOADED",
+                        status="SUCCESS",
+                        incident_id=str(incident_id),
+                        evidence_id=metadata.collection_job_id,
+                        endpoint_id=canonical_id,
+                        actor="S3StorageService",
+                        evidence_hash=metadata.s3_checksum_sha256 or metadata.file_hash_sha256,
+                        source_location=metadata.artifact_location,
+                        destination_location=f"s3://{metadata.s3_bucket}/{metadata.s3_object_key}",
+                        execution_mode=exec_mode,
+                    )
             except Exception as err:
                 logger.error("Failed to archive job %s to S3 during initiation: %s", metadata.collection_job_id, err)
                 metadata.record_s3_failure(str(err))
+                if self.audit_service:
+                    self.audit_service.record_event(
+                        action="S3_UPLOAD_FAILED",
+                        status="FAILURE",
+                        incident_id=str(incident_id),
+                        evidence_id=metadata.collection_job_id,
+                        endpoint_id=canonical_id,
+                        actor="S3StorageService",
+                        execution_mode=exec_mode,
+                        details={"error": str(err)},
+                    )
 
         metadata.save(self.evidence_dir)
 

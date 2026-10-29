@@ -97,16 +97,22 @@ class EvidenceCatalogService:
     for forensic evidence artifacts.
     """
 
-    def __init__(self, db_path: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        db_path: Optional[str] = None,
+        audit_service: Optional[Any] = None,
+    ) -> None:
         """
         Initializes the Evidence Catalog Service.
         
         Args:
             db_path: Path to the SQLite database file, or ':memory:'.
                      Defaults to EVIDENCE_CATALOG_DB env var or 'evidence_catalog.db'.
+            audit_service: Optional ChainOfCustodyService for audit ledger integration.
         """
         env_path = os.getenv("EVIDENCE_CATALOG_DB")
         self.db_path = db_path or env_path or DEFAULT_DB_PATH
+        self.audit_service = audit_service
         # For :memory: databases, maintain a single persistent connection so data
         # survives across calls (each new sqlite3.connect(':memory:') creates an
         # isolated, empty database).
@@ -316,6 +322,23 @@ class EvidenceCatalogService:
                 ),
             )
 
+        if self.audit_service:
+            try:
+                self.audit_service.record_event(
+                    action="EVIDENCE_INDEXED",
+                    status="SUCCESS",
+                    incident_id=record.incident_id,
+                    evidence_id=record.evidence_id,
+                    endpoint_id=record.device_id,
+                    actor="EvidenceCatalogService",
+                    evidence_hash=record.sha256_hash,
+                    destination_location=str(self.db_path),
+                    execution_mode="MOCK" if record.simulation_indicator else "REAL",
+                    details={"file_name": record.file_name, "size_bytes": record.file_size_bytes},
+                )
+            except Exception as audit_err:
+                logger.warning("Failed to record audit event for indexing: %s", audit_err)
+
         logger.info(
             f"Indexed evidence {record.evidence_id} (Type: {record.evidence_type}, Hash: {record.sha256_hash[:12]}...)"
         )
@@ -484,7 +507,7 @@ class EvidenceCatalogService:
             error = None if is_valid else (
                 f"Hash mismatch: indexed '{record.sha256_hash}' != calculated '{recomputed}'"
             )
-            return IntegrityCheckResult(
+            result = IntegrityCheckResult(
                 evidence_id=evidence_id,
                 file_path=target_path,
                 indexed_hash=record.sha256_hash,
@@ -493,7 +516,36 @@ class EvidenceCatalogService:
                 verified_at=now_iso,
                 error_message=error,
             )
+            if self.audit_service:
+                try:
+                    self.audit_service.record_event(
+                        action="INTEGRITY_VERIFIED" if is_valid else "INTEGRITY_REJECTED",
+                        status="SUCCESS" if is_valid else "FAILURE",
+                        incident_id=record.incident_id,
+                        evidence_id=record.evidence_id,
+                        endpoint_id=record.device_id,
+                        actor="EvidenceCatalogService",
+                        evidence_hash=recomputed if is_valid else record.sha256_hash,
+                        execution_mode="MOCK" if record.simulation_indicator else "REAL",
+                        details={"error": error} if error else {"recalculated_hash": recomputed},
+                    )
+                except Exception as audit_err:
+                    logger.warning("Failed to record audit event for integrity check: %s", audit_err)
+            return result
         except Exception as exc:
+            err_msg = f"Failed to read file for hash computation: {exc}"
+            if self.audit_service:
+                try:
+                    self.audit_service.record_event(
+                        action="INTEGRITY_REJECTED",
+                        status="FAILURE",
+                        incident_id=record.incident_id if record else None,
+                        evidence_id=evidence_id,
+                        actor="EvidenceCatalogService",
+                        details={"error": err_msg},
+                    )
+                except Exception:
+                    pass
             return IntegrityCheckResult(
                 evidence_id=evidence_id,
                 file_path=target_path,
@@ -501,5 +553,5 @@ class EvidenceCatalogService:
                 recalculated_hash="",
                 is_valid=False,
                 verified_at=now_iso,
-                error_message=f"Failed to read file for hash computation: {exc}",
+                error_message=err_msg,
             )

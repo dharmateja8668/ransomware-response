@@ -38,6 +38,20 @@ from storage.s3_storage import (
     S3StorageService,
     UploadResult,
 )
+from forensic.chain_of_custody import (
+    AuditAction,
+    AuditEvent,
+    AuditIntegrityError,
+    AuditLoggingError,
+    AuditPolicy,
+    AuditStatus,
+    AuditVerificationResult,
+    ChainOfCustodyError,
+    ChainOfCustodyService,
+    ExecutionMode,
+    GENESIS_HASH,
+    sanitize_audit_details,
+)
 
 __all__ = [
     # Status & Method Enums
@@ -74,4 +88,17 @@ __all__ = [
     "S3Config",
     "S3StorageService",
     "UploadResult",
+    # Day 5 Chain of Custody
+    "AuditAction",
+    "AuditEvent",
+    "AuditIntegrityError",
+    "AuditLoggingError",
+    "AuditPolicy",
+    "AuditStatus",
+    "AuditVerificationResult",
+    "ChainOfCustodyError",
+    "ChainOfCustodyService",
+    "ExecutionMode",
+    "GENESIS_HASH",
+    "sanitize_audit_details",
 ]

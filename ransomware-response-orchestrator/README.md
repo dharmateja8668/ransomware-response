@@ -1,7 +1,12 @@
-# Day 1: EDR Live Response Integration
-## Automated Ransomware Containment & Incident Response Orchestrator
+# Week 3: Automated Ransomware Containment & Incident Response Orchestrator
+## Days 1–5: EDR Integration, Forensic Collection, S3 Archival, Evidence Indexing & Chain of Custody
 
-An automated incident response orchestration module built for Security Operations Center (SOC) incident response. Day 1 focuses on establishing secure, authenticated connectivity to an Enterprise Endpoint Detection and Response (EDR) platform—specifically **Microsoft Defender for Endpoint (MDE)**—to retrieve active ransomware incident indicators and verify the real-time containment/isolation status of affected endpoints.
+An automated incident response orchestration platform built for Security Operations Center (SOC) forensics and response.
+- **Day 1**: Microsoft Defender for Endpoint Integration & Read-Only Containment Verification
+- **Day 2**: Automated Forensic Evidence Collection (KAPE, Physical RAM, Native MDE Packages)
+- **Day 3**: Secure AWS S3 Evidence Archival with SHA-256 Storage Verification
+- **Day 4**: SQLite Evidence Indexing, Forensic Artifact Triage & EDR Alert Correlation
+- **Day 5**: Chain-of-Custody Cryptographic Audit Ledger & End-to-End Orchestrator Validation
 
 ---
 
@@ -15,7 +20,9 @@ An automated incident response orchestration module built for Security Operation
 7. [Endpoint Containment Verification Logic](#endpoint-containment-verification-logic)
 8. [Security & Secret Redaction Controls](#security--secret-redaction-controls)
 9. [Running the Unit Test Suite](#running-the-unit-test-suite)
-10. [Git Commands for Day 1 Commit](#git-commands-for-day-1-commit)
+10. [Known Limitations](#10-known-limitations)
+11. [Day 5: Chain of Custody & Cryptographic Audit Ledger](#11-day-5-chain-of-custody--cryptographic-audit-ledger)
+
 
 ---
 
@@ -965,4 +972,45 @@ python app.py --mock --upload-s3 --job kape-9cb6447b95
 
 1. **Pre-Existing S3 Infrastructure**: Real S3 uploads require an existing S3 bucket with Object Lock enabled and appropriate IAM permissions. The orchestrator deliberately avoids automatic cloud resource creation.
 2. **Bandwidth Limitations on Massive Memory Dumps**: Uploading multi-gigabyte RAM images (e.g., 32 GB - 64 GB) over public internet can incur high transfer times; in live AWS deployments, utilizing an **S3 VPC Endpoint** (`com.amazonaws.<region>.s3`) and multipart streaming is required.
-3. **Cross-Region Replication**: Automated cross-region replication to a secondary compliance bucket will be addressed in Day 4.
+3. **Local Audit Ledger Tamper-Resistance**: A hash chain in a local SQLite file is tamper-evident against application modifications, but not independently tamper-proof against an adversary with filesystem write access who can recompute hashes. Enterprise deployments should stream events to an external SIEM and S3 WORM storage.
+
+---
+
+## 11. Day 5: Chain of Custody & Cryptographic Audit Ledger
+
+### Overview
+Day 5 introduces an append-only, tamper-evident cryptographic audit ledger (`forensic/chain_of_custody.py`) that tracks all digital evidence operations from acquisition to correlation.
+
+### Key Capabilities
+- **Deterministic SHA-256 Hash Chaining**: Every event links cryptographically to the preceding record's hash (`previous_event_hash`), starting from a documented 64-character genesis value (`000...000`).
+- **Active Immutability Triggers**: SQLite triggers actively block `UPDATE` and `DELETE` statements, preventing accidental or unauthorized alteration of historical records.
+- **Automated Secret Redaction**: Eliminates credential exposure by redacting Bearer tokens, AWS keys, and passwords prior to persistence and hashing.
+- **Concurrency Safety**: Thread-synchronized transactions with Write-Ahead Logging (`WAL`) and `BEGIN IMMEDIATE` locks ensure safe interleaved writes across concurrent collectors.
+- **Safety Policy Enforcement**: Strict audit policy (`AuditPolicy.STRICT`) halts pipeline execution on audit write failures, preventing unaudited forensic operations.
+
+### CLI Inspection Commands
+```powershell
+# 1. Cryptographically verify the entire audit ledger:
+python app.py audit verify --mock
+
+# 2. Display recent audit events:
+python app.py audit list --mock --limit 20
+
+# 3. Inspect custody history for a specific evidence item:
+python app.py audit evidence <evidence_id> --mock
+
+# 4. View all audit events for a security incident:
+python app.py audit incident 1001 --mock
+
+# 5. Execute full end-to-end Days 1-5 pipeline with audit verification:
+python app.py --full-workflow --mock
+```
+
+### Automated Test Suite (106 passed in 5.15s)
+```powershell
+# Run Day 5 Chain-of-Custody & Safety Tests:
+pytest tests/test_chain_of_custody.py -v
+
+# Run the complete orchestrator test suite:
+pytest tests/ -v
+```

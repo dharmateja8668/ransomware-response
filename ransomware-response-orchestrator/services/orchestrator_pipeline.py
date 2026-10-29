@@ -9,6 +9,7 @@ Coordinates the end-to-end incident response lifecycle:
   4. SQLite Evidence Catalog Indexing & Integrity Verification (Day 4)
   5. Automated Forensic Artifact Triage & IOC Extraction (Day 4)
   6. EDR Alert Correlation & Threat Scoring (Day 4)
+  7. Chain-of-Custody Cryptographic Audit Logging & Chain Verification (Day 5)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
@@ -21,6 +22,15 @@ from typing import Any, Dict, List, Optional
 
 from analysis.alert_correlator import AlertCorrelator, CorrelationReport
 from analysis.artifact_analyzer import ArtifactAnalysisReport, ArtifactAnalyzer
+from forensic.chain_of_custody import (
+    AuditAction,
+    AuditLoggingError,
+    AuditPolicy,
+    AuditStatus,
+    AuditVerificationResult,
+    ChainOfCustodyService,
+    ExecutionMode,
+)
 from forensic.collection_service import ForensicCollectionService
 from integrations.defender_client import DefenderClient
 from services.evidence_catalog import CatalogRecord, EvidenceCatalogService
@@ -43,6 +53,8 @@ class UnifiedWorkflowReport:
     indexed_records_count: int = 0
     analyzed_reports_count: int = 0
     correlation_report: Optional[CorrelationReport] = None
+    chain_of_custody_verified: bool = True
+    audit_events_count: int = 0
     simulation_indicator: bool = False
     pipeline_status: str = "SUCCESS"  # SUCCESS, PARTIAL_SUCCESS, FAILED
     errors: List[str] = field(default_factory=list)
@@ -53,6 +65,8 @@ class UnifiedWorkflowReport:
             "executed_at": self.executed_at,
             "pipeline_status": self.pipeline_status,
             "simulation_indicator": self.simulation_indicator,
+            "chain_of_custody_verified": self.chain_of_custody_verified,
+            "audit_events_count": self.audit_events_count,
             "triage_summary": self.triage_report.to_dict() if self.triage_report else None,
             "collected_jobs_count": self.collected_jobs_count,
             "s3_uploaded_count": self.s3_uploaded_count,
@@ -66,7 +80,7 @@ class UnifiedWorkflowReport:
 class OrchestratorPipeline:
     """
     Unified controller coordinating containment verification, evidence acquisition,
-    cloud archival, indexing, and threat correlation.
+    cloud archival, indexing, threat correlation, and cryptographic chain-of-custody.
     """
 
     def __init__(
@@ -78,17 +92,21 @@ class OrchestratorPipeline:
         catalog_service: Optional[EvidenceCatalogService] = None,
         analyzer: Optional[ArtifactAnalyzer] = None,
         correlator: Optional[AlertCorrelator] = None,
+        audit_service: Optional[ChainOfCustodyService] = None,
     ) -> None:
         self.defender_client = defender_client or DefenderClient()
         self.incident_service = incident_service or IncidentService(self.defender_client)
+        self.s3_service = s3_service
         self.collection_service = collection_service or ForensicCollectionService(
             defender_client=self.defender_client,
             s3_storage_service=s3_service,
         )
-        self.s3_service = s3_service
         self.catalog_service = catalog_service or EvidenceCatalogService()
         self.analyzer = analyzer or ArtifactAnalyzer()
         self.correlator = correlator or AlertCorrelator()
+        self.audit_service = audit_service or ChainOfCustodyService(
+            db_path=self.catalog_service.db_path
+        )
 
     def run_full_workflow(
         self,
@@ -98,12 +116,12 @@ class OrchestratorPipeline:
     ) -> UnifiedWorkflowReport:
         """
         Executes the complete incident response automation cycle.
-        
+
         Args:
             incident_id: Target incident ID.
             upload_to_s3: Whether to archive collected evidence to S3.
             collection_types: Evidence types to collect (e.g. ['KAPE', 'RAM']).
-            
+
         Returns:
             UnifiedWorkflowReport detailing all stages.
         """
@@ -111,6 +129,12 @@ class OrchestratorPipeline:
         collection_types = collection_types or ["KAPE", "RAM"]
 
         logger.info(f"Initiating end-to-end IR orchestrator workflow for incident {incident_id}")
+
+        # Determine execution mode from client configuration
+        is_mock_client = getattr(self.defender_client, "mock_mode", False) or getattr(
+            self.defender_client.config, "mock_mode", False
+        )
+        exec_mode = ExecutionMode.MOCK.value if is_mock_client else ExecutionMode.REAL.value
 
         # Stage 1: Incident Triage & Containment Status (Day 1)
         try:
@@ -124,14 +148,100 @@ class OrchestratorPipeline:
             logger.error(msg)
             report.errors.append(msg)
             report.pipeline_status = "FAILED"
+            if self.audit_service:
+                try:
+                    self.audit_service.record_event(
+                        action=AuditAction.CONTAINMENT_FAILED,
+                        status=AuditStatus.FAILURE,
+                        incident_id=incident_id,
+                        actor="IncidentService",
+                        execution_mode=exec_mode,
+                        details={"error": str(exc)},
+                    )
+                except Exception as audit_err:
+                    report.errors.append(f"Audit log error: {audit_err}")
             return report
 
+        # Verify containment status of endpoints and record chain-of-custody events
+        contained_devices: List[str] = []
+        containment_map: Dict[str, bool] = {}
+
+        if triage_report.endpoint_assessments:
+            for ep in triage_report.endpoint_assessments:
+                is_isolated = (ep.containment_status == "ISOLATED")
+                containment_map[ep.device_name] = is_isolated
+                try:
+                    if self.audit_service:
+                        self.audit_service.record_event(
+                            action=AuditAction.CONTAINMENT_VERIFIED if is_isolated else AuditAction.CONTAINMENT_FAILED,
+                            status=AuditStatus.SUCCESS if is_isolated else AuditStatus.FAILURE,
+                            incident_id=incident_id,
+                            endpoint_id=ep.device_name,
+                            actor="IncidentService",
+                            execution_mode=exec_mode,
+                            details={
+                                "containment_status": ep.containment_status,
+                                "risk_score": ep.risk_score,
+                                "health_status": ep.health_status,
+                            },
+                        )
+                except AuditLoggingError as audit_err:
+                    msg = f"Security Audit Policy Failure during containment logging: {audit_err}"
+                    logger.error(msg)
+                    report.errors.append(msg)
+                    report.pipeline_status = "FAILED"
+                    return report
+
+                if is_isolated:
+                    contained_devices.append(ep.device_name)
+                else:
+                    msg = f"Endpoint '{ep.device_name}' containment status is {ep.containment_status}; evidence collection disallowed."
+                    logger.warning(msg)
+                    report.errors.append(msg)
+        else:
+            # Fallback if no detailed assessments present
+            contained_devices = list(triage_report.affected_devices)
+
         # Stage 2: Forensic Collection (Day 2)
-        # Note: initiate_collection returns EvidenceMetadata directly.
-        collected_metadata: List["EvidenceMetadata"] = []  # type: ignore[name-defined]
-        is_simulation = False
-        for device_name in triage_report.affected_devices:
+        collected_metadata: List[Any] = []
+        is_simulation = is_mock_client
+
+        # If no contained devices exist among affected devices, fail or record
+        if not contained_devices and triage_report.affected_devices:
+            msg = "Stage 2 skipped: No endpoints verified as ISOLATED."
+            logger.warning(msg)
+            report.errors.append(msg)
+
+        for device_name in contained_devices:
             for c_type in collection_types:
+                # Record collection requested
+                try:
+                    if self.audit_service:
+                        self.audit_service.record_event(
+                            action=AuditAction.COLLECTION_REQUESTED,
+                            status=AuditStatus.SUCCESS,
+                            incident_id=incident_id,
+                            endpoint_id=device_name,
+                            actor="ForensicCollectionService",
+                            execution_mode=exec_mode,
+                            details={"collection_method": c_type},
+                        )
+                        self.audit_service.record_event(
+                            action=AuditAction.COLLECTION_STARTED,
+                            status=AuditStatus.SUCCESS,
+                            incident_id=incident_id,
+                            endpoint_id=device_name,
+                            actor="ForensicCollectionService",
+                            execution_mode=exec_mode,
+                            details={"collection_method": c_type},
+                        )
+                except AuditLoggingError as audit_err:
+                    msg = f"Audit policy failure before collection ({device_name}, {c_type}): {audit_err}"
+                    logger.error(msg)
+                    report.errors.append(msg)
+                    report.pipeline_status = "FAILED"
+                    return report
+
                 try:
                     meta = self.collection_service.initiate_collection(
                         incident_id=incident_id,
@@ -142,33 +252,197 @@ class OrchestratorPipeline:
                     collected_metadata.append(meta)
                     if meta.simulation_indicator:
                         is_simulation = True
+
+                    item_exec_mode = (
+                        ExecutionMode.MOCK.value
+                        if meta.simulation_indicator
+                        else ExecutionMode.REAL.value
+                    )
+
+                    if self.audit_service:
+                        self.audit_service.record_event(
+                            action=AuditAction.COLLECTION_COMPLETED,
+                            status=AuditStatus.SUCCESS,
+                            incident_id=incident_id,
+                            evidence_id=meta.collection_job_id,
+                            endpoint_id=device_name,
+                            actor="ForensicCollectionService",
+                            evidence_hash=meta.file_hash_sha256,
+                            source_location=meta.artifact_location,
+                            execution_mode=item_exec_mode,
+                            details={"collection_method": meta.collection_method},
+                        )
+                        if meta.file_hash_sha256:
+                            self.audit_service.record_event(
+                                action=AuditAction.HASH_CALCULATED,
+                                status=AuditStatus.SUCCESS,
+                                incident_id=incident_id,
+                                evidence_id=meta.collection_job_id,
+                                endpoint_id=device_name,
+                                actor="ForensicCollectionService",
+                                evidence_hash=meta.file_hash_sha256,
+                                source_location=meta.artifact_location,
+                                execution_mode=item_exec_mode,
+                                details={"algorithm": "SHA-256"},
+                            )
+                except AuditLoggingError as audit_err:
+                    msg = f"Audit policy failure during collection ({device_name}, {c_type}): {audit_err}"
+                    logger.error(msg)
+                    report.errors.append(msg)
+                    report.pipeline_status = "FAILED"
+                    return report
                 except Exception as exc:
                     msg = f"Stage 2 Collection failed ({device_name}, {c_type}): {exc}"
                     logger.warning(msg)
                     report.errors.append(msg)
+                    if self.audit_service:
+                        try:
+                            self.audit_service.record_event(
+                                action=AuditAction.COLLECTION_FAILED,
+                                status=AuditStatus.FAILURE,
+                                incident_id=incident_id,
+                                endpoint_id=device_name,
+                                actor="ForensicCollectionService",
+                                execution_mode=exec_mode,
+                                details={"error": str(exc), "method": c_type},
+                            )
+                        except Exception:
+                            pass
 
         report.collected_jobs_count = len(collected_metadata)
         report.simulation_indicator = is_simulation
         logger.info(f"[Stage 2] Completed {len(collected_metadata)} collection jobs.")
 
-        # Stage 3: S3 Archival Count (Day 3)
-        s3_success_count = sum(
-            1 for m in collected_metadata
-            if m.s3_upload_status in {"SUCCESS", "MOCK_SUCCESS", "UPLOADED", "VERIFIED"}
-        )
+        # Stage 3: S3 Archival Count & Chain of Custody (Day 3)
+        s3_success_count = 0
+        for meta in collected_metadata:
+            item_exec_mode = (
+                ExecutionMode.MOCK.value
+                if meta.simulation_indicator
+                else ExecutionMode.REAL.value
+            )
+            if meta.s3_upload_status in {"SUCCESS", "MOCK_SUCCESS", "UPLOADED", "VERIFIED"}:
+                s3_success_count += 1
+                if self.audit_service:
+                    try:
+                        self.audit_service.record_event(
+                            action=AuditAction.S3_UPLOADED,
+                            status=AuditStatus.SUCCESS,
+                            incident_id=incident_id,
+                            evidence_id=meta.collection_job_id,
+                            endpoint_id=meta.endpoint_id,
+                            actor="S3StorageService",
+                            evidence_hash=meta.s3_checksum_sha256 or meta.file_hash_sha256,
+                            source_location=meta.artifact_location,
+                            destination_location=f"s3://{meta.s3_bucket}/{meta.s3_object_key}",
+                            execution_mode=item_exec_mode,
+                            details={
+                                "s3_bucket": meta.s3_bucket,
+                                "s3_key": meta.s3_object_key,
+                                "version_id": meta.s3_version_id,
+                                "checksum_verified": meta.s3_checksum_verified,
+                            },
+                        )
+                    except AuditLoggingError as audit_err:
+                        report.errors.append(f"Audit policy failure during S3 record: {audit_err}")
+                        report.pipeline_status = "FAILED"
+                        return report
+            elif upload_to_s3 and meta.s3_upload_status in {"FAILED", "ERROR"}:
+                if self.audit_service:
+                    try:
+                        self.audit_service.record_event(
+                            action=AuditAction.S3_UPLOAD_FAILED,
+                            status=AuditStatus.FAILURE,
+                            incident_id=incident_id,
+                            evidence_id=meta.collection_job_id,
+                            endpoint_id=meta.endpoint_id,
+                            actor="S3StorageService",
+                            execution_mode=item_exec_mode,
+                            details={"error": meta.error_details or "S3 upload failed"},
+                        )
+                    except Exception:
+                        pass
+
         report.s3_uploaded_count = s3_success_count
         logger.info(f"[Stage 3] Evidence uploaded to S3: {s3_success_count} artifacts.")
 
-        # Stage 4: Index into SQLite Catalog (Day 4)
+        # Stage 4: Index into SQLite Catalog & Integrity Verification (Day 4)
         catalog_records: List[CatalogRecord] = []
         for meta in collected_metadata:
+            item_exec_mode = (
+                ExecutionMode.MOCK.value
+                if meta.simulation_indicator
+                else ExecutionMode.REAL.value
+            )
             try:
                 rec = self.catalog_service.index_evidence_metadata(meta)
                 catalog_records.append(rec)
+
+                # Record catalog indexing event
+                if self.audit_service:
+                    self.audit_service.record_event(
+                        action=AuditAction.EVIDENCE_INDEXED,
+                        status=AuditStatus.SUCCESS,
+                        incident_id=incident_id,
+                        evidence_id=rec.evidence_id,
+                        endpoint_id=rec.device_id,
+                        actor="EvidenceCatalogService",
+                        evidence_hash=rec.sha256_hash,
+                        destination_location=str(self.catalog_service.db_path),
+                        execution_mode=item_exec_mode,
+                        details={"file_name": rec.file_name, "size_bytes": rec.file_size_bytes},
+                    )
+
+                # Standalone cryptographic integrity audit
+                integrity_res = self.catalog_service.verify_integrity(rec.evidence_id)
+                if self.audit_service:
+                    if integrity_res.is_valid:
+                        self.audit_service.record_event(
+                            action=AuditAction.INTEGRITY_VERIFIED,
+                            status=AuditStatus.SUCCESS,
+                            incident_id=incident_id,
+                            evidence_id=rec.evidence_id,
+                            endpoint_id=rec.device_id,
+                            actor="EvidenceCatalogService",
+                            evidence_hash=integrity_res.recalculated_hash,
+                            execution_mode=item_exec_mode,
+                            details={"recalculated_hash": integrity_res.recalculated_hash},
+                        )
+                    else:
+                        self.audit_service.record_event(
+                            action=AuditAction.INTEGRITY_REJECTED,
+                            status=AuditStatus.FAILURE,
+                            incident_id=incident_id,
+                            evidence_id=rec.evidence_id,
+                            endpoint_id=rec.device_id,
+                            actor="EvidenceCatalogService",
+                            evidence_hash=integrity_res.indexed_hash,
+                            execution_mode=item_exec_mode,
+                            details={"error": integrity_res.error_message},
+                        )
+                        msg = f"Integrity check rejected for {rec.evidence_id}: {integrity_res.error_message}"
+                        report.errors.append(msg)
+            except AuditLoggingError as audit_err:
+                report.errors.append(f"Audit policy failure during indexing: {audit_err}")
+                report.pipeline_status = "FAILED"
+                return report
             except Exception as exc:
                 msg = f"Stage 4 Catalog Indexing failed for {meta.collection_job_id}: {exc}"
                 logger.warning(msg)
                 report.errors.append(msg)
+                if self.audit_service:
+                    try:
+                        self.audit_service.record_event(
+                            action=AuditAction.INDEXING_FAILED,
+                            status=AuditStatus.FAILURE,
+                            incident_id=incident_id,
+                            evidence_id=meta.collection_job_id,
+                            actor="EvidenceCatalogService",
+                            execution_mode=item_exec_mode,
+                            details={"error": str(exc)},
+                        )
+                    except Exception:
+                        pass
 
         report.indexed_records_count = len(catalog_records)
         logger.info(f"[Stage 4] Indexed {len(catalog_records)} evidence items into SQLite catalog.")
@@ -176,6 +450,11 @@ class OrchestratorPipeline:
         # Stage 5: Forensic Artifact Analysis (Day 4)
         analysis_reports: List[ArtifactAnalysisReport] = []
         for meta in collected_metadata:
+            item_exec_mode = (
+                ExecutionMode.MOCK.value
+                if meta.simulation_indicator
+                else ExecutionMode.REAL.value
+            )
             try:
                 fpath = meta.artifact_location or ""
                 ana_rep = self.analyzer.analyze_evidence_file(
@@ -186,10 +465,43 @@ class OrchestratorPipeline:
                     simulation_indicator=meta.simulation_indicator,
                 )
                 analysis_reports.append(ana_rep)
+
+                if self.audit_service:
+                    self.audit_service.record_event(
+                        action=AuditAction.ANALYSIS_COMPLETED,
+                        status=AuditStatus.SUCCESS,
+                        incident_id=incident_id,
+                        evidence_id=meta.collection_job_id,
+                        endpoint_id=meta.endpoint_id,
+                        actor="ArtifactAnalyzer",
+                        execution_mode=item_exec_mode,
+                        details={
+                            "findings_count": len(ana_rep.findings),
+                            "iocs_extracted": len(ana_rep.extracted_iocs),
+                            "risk_assessment": ana_rep.risk_assessment,
+                        },
+                    )
+            except AuditLoggingError as audit_err:
+                report.errors.append(f"Audit policy failure during analysis: {audit_err}")
+                report.pipeline_status = "FAILED"
+                return report
             except Exception as exc:
                 msg = f"Stage 5 Artifact Analysis failed for {meta.collection_job_id}: {exc}"
                 logger.warning(msg)
                 report.errors.append(msg)
+                if self.audit_service:
+                    try:
+                        self.audit_service.record_event(
+                            action=AuditAction.ANALYSIS_FAILED,
+                            status=AuditStatus.FAILURE,
+                            incident_id=incident_id,
+                            evidence_id=meta.collection_job_id,
+                            actor="ArtifactAnalyzer",
+                            execution_mode=item_exec_mode,
+                            details={"error": str(exc)},
+                        )
+                    except Exception:
+                        pass
 
         report.analyzed_reports_count = len(analysis_reports)
         logger.info(f"[Stage 5] Generated {len(analysis_reports)} forensic analysis reports.")
@@ -215,7 +527,22 @@ class OrchestratorPipeline:
             logger.warning(msg)
             report.errors.append(msg)
 
-        if report.errors:
+        # Stage 7: Cryptographic Chain-of-Custody Verification (Day 5)
+        if self.audit_service:
+            chain_check = self.audit_service.verify_audit_chain()
+            report.chain_of_custody_verified = chain_check.is_valid
+            report.audit_events_count = chain_check.total_events
+            if not chain_check.is_valid:
+                msg = f"Chain of custody integrity compromised: {chain_check.error_message}"
+                logger.critical(msg)
+                report.errors.append(msg)
+                report.pipeline_status = "FAILED"
+            else:
+                logger.info(
+                    f"[Stage 7] Chain of custody verified intact: {chain_check.total_events} events checked."
+                )
+
+        if report.errors and report.pipeline_status != "FAILED":
             report.pipeline_status = "PARTIAL_SUCCESS"
 
         return report

@@ -25,6 +25,7 @@ An automated incident response orchestration platform designed to intake endpoin
 18. [Running the Test Suite](#running-the-test-suite)
 19. [Current Limitations](#current-limitations)
 20. [Security Best Practices](#security-best-practices)
+21. [Week 3 — Forensic Acquisition, S3 Archival & Chain of Custody](#week-3--forensic-acquisition-s3-archival--chain-of-custody)
 
 ---
 
@@ -947,3 +948,16 @@ To prevent race conditions across multi-worker Uvicorn or container deployments:
 3. **Zero-Log Exposure**: Credentials, auth headers, and secrets are strictly excluded from logs.
 4. **Parameterized SQL Queries**: All SQLite interactions utilize parameterized statements (`?`) to prevent SQL injection.
 5. **Environment Isolation**: Secrets and credentials are kept out of Git via `.gitignore`.
+
+---
+
+## Week 3 — Forensic Acquisition, S3 Archival & Chain of Custody
+
+The complete Week 3 incident response orchestration system is implemented in [`ransomware-response-orchestrator/`](ransomware-response-orchestrator/):
+- **Day 1**: Microsoft Defender for Endpoint Live Response & Containment Verification (`integrations/defender_client.py`).
+- **Day 2**: Automated Forensic Evidence Collection for Physical RAM, KAPE Triage, and MDE Packages (`forensic/evidence_collector.py`, `forensic/collection_service.py`).
+- **Day 3**: Secure AWS S3 Evidence Storage with SHA-256 Storage Verification (`storage/s3_storage.py`, `docs/AWS_S3_FORENSIC_STORAGE_GUIDE.md`).
+- **Day 4**: SQLite Evidence Indexing, Forensic Artifact Triage & EDR Alert Correlation (`services/evidence_catalog.py`, `analysis/artifact_analyzer.py`, `analysis/alert_correlator.py`).
+- **Day 5**: Cryptographic Chain-of-Custody Audit Ledger, Immutability Triggers & End-to-End Orchestrator Pipeline (`forensic/chain_of_custody.py`, `services/orchestrator_pipeline.py`, `docs/CHAIN_OF_CUSTODY_GUIDE.md`).
+
+For detailed usage, architecture, and CLI specifications, see [`ransomware-response-orchestrator/README.md`](ransomware-response-orchestrator/README.md) and [`ransomware-response-orchestrator/docs/CHAIN_OF_CUSTODY_GUIDE.md`](ransomware-response-orchestrator/docs/CHAIN_OF_CUSTODY_GUIDE.md).

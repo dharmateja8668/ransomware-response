@@ -129,6 +129,15 @@ from services.orchestrator_pipeline import (
     OrchestratorPipeline,
     UnifiedWorkflowReport,
 )
+from forensic.chain_of_custody import (
+    AuditAction,
+    AuditEvent,
+    AuditPolicy,
+    AuditStatus,
+    AuditVerificationResult,
+    ChainOfCustodyService,
+    GENESIS_HASH,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -484,11 +493,71 @@ def print_pipeline_report(report: UnifiedWorkflowReport) -> None:
     print(f"  Stage 5 Artifact Triage: {report.analyzed_reports_count} analysis reports compiled")
     if report.correlation_report:
         print(f"  Stage 6 Correlation  : Threat [{report.correlation_report.overall_threat_level}], Score {report.correlation_report.correlation_score}/100")
+    print(f"  Stage 7 Audit Chain  : {'VERIFIED INTACT' if report.chain_of_custody_verified else 'COMPROMISED'} ({report.audit_events_count} events)")
     if report.errors:
         print(f"\n  [Pipeline Warnings/Errors ({len(report.errors)})]:")
         for err in report.errors:
             print(f"    [-] {err}")
     print(border + "\n")
+
+
+def print_audit_verification(result: AuditVerificationResult) -> None:
+    """Renders cryptographic audit verification summary."""
+    border = "=" * 80
+    print("\n" + border)
+    print("[*] CHAIN-OF-CUSTODY CRYPTOGRAPHIC AUDIT VERIFICATION")
+    print(border)
+    status_str = "VERIFIED INTACT" if result.is_valid else "COMPROMISED / TAMPER DETECTED"
+    print(f"  Verification Status  : [{status_str}]")
+    print(f"  Total Ledger Events  : {result.total_events}")
+    print(f"  Verified Events      : {result.verified_events}")
+    print(f"  Verified At (UTC)    : {result.verified_at}")
+    print(f"  Genesis Block Hash   : {GENESIS_HASH}")
+    if result.compromised_event_id:
+        print(f"  Compromised Event ID : {result.compromised_event_id}")
+    if result.compromised_sequence:
+        print(f"  Compromised Sequence : #{result.compromised_sequence}")
+    if result.error_message:
+        print(f"\n  [!] Anomaly Details  : {result.error_message}")
+    print(border + "\n")
+
+
+def print_audit_events(events: List[AuditEvent], title: str = "AUDIT TRAIL EVENTS") -> None:
+    """Renders tabular chain-of-custody event history."""
+    border = "=" * 80
+    sub_border = "-" * 80
+    print("\n" + border)
+    print(f"[*] {title} ({len(events)} events)")
+    print(border)
+    if not events:
+        print("  (No audit events found)")
+        print(border + "\n")
+        return
+
+    for ev in events:
+        mode_tag = f"[{ev.execution_mode}]"
+        status_tag = f"[{ev.status}]"
+        print(f"  Seq #{ev.sequence_number or 'N/A'} | Event: {ev.event_id} | {ev.timestamp}")
+        print(f"    Action      : {ev.action} {status_tag} {mode_tag}")
+        print(f"    Actor       : {ev.actor}")
+        if ev.incident_id:
+            print(f"    Incident ID : #{ev.incident_id}")
+        if ev.evidence_id:
+            print(f"    Evidence ID : {ev.evidence_id}")
+        if ev.endpoint_id:
+            print(f"    Endpoint ID : {ev.endpoint_id}")
+        if ev.evidence_hash:
+            print(f"    Evidence SHA-256 : {ev.evidence_hash}")
+        if ev.source_location:
+            print(f"    Source Loc  : {ev.source_location}")
+        if ev.destination_location:
+            print(f"    Dest Loc    : {ev.destination_location}")
+        print(f"    Event Hash  : {ev.event_hash}")
+        print(f"    Prev Hash   : {ev.previous_event_hash}")
+        if ev.details:
+            print(f"    Details     : {json.dumps(ev.details)}")
+        print(sub_border)
+    print()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -623,6 +692,61 @@ def main() -> int:
         help="Correlate Defender for Endpoint alerts with catalog evidence and artifact findings",
     )
 
+    # Day 5: Chain of Custody & Cryptographic Audit Ledger
+    parser.add_argument(
+        "--audit-verify",
+        action="store_true",
+        help="Verify the integrity of the chain-of-custody audit hash chain",
+    )
+    parser.add_argument(
+        "--audit-list",
+        action="store_true",
+        help="Display recent chain-of-custody audit events",
+    )
+    parser.add_argument(
+        "--audit-evidence",
+        type=str,
+        default=None,
+        help="Show chain-of-custody history for a specific evidence ID",
+    )
+    parser.add_argument(
+        "--audit-incident",
+        type=str,
+        default=None,
+        help="Show chain-of-custody history for a specific incident ID",
+    )
+    parser.add_argument(
+        "--audit-limit",
+        type=int,
+        default=50,
+        help="Maximum number of audit events to display (default: 50)",
+    )
+
+    subparsers = parser.add_subparsers(dest="subcommand", help="Available subcommands")
+    audit_parser = subparsers.add_parser("audit", help="Chain of custody audit ledger commands")
+    audit_parser.add_argument("--mock", action="store_true", help="Force mock mode")
+    audit_parser.add_argument("--json", action="store_true", help="Output raw JSON")
+    audit_sub = audit_parser.add_subparsers(dest="audit_action", help="Audit actions")
+
+    verify_p = audit_sub.add_parser("verify", help="Cryptographically verify chain-of-custody audit log")
+    verify_p.add_argument("--mock", action="store_true", help="Force mock mode")
+    verify_p.add_argument("--json", action="store_true", help="Output raw JSON")
+
+    audit_list_p = audit_sub.add_parser("list", help="Display recent chain-of-custody events")
+    audit_list_p.add_argument("--limit", type=int, default=50, help="Maximum events to display")
+    audit_list_p.add_argument("--mock", action="store_true", help="Force mock mode")
+    audit_list_p.add_argument("--json", action="store_true", help="Output raw JSON")
+
+    audit_ev_p = audit_sub.add_parser("evidence", help="Show custody history for a specific evidence item")
+    audit_ev_p.add_argument("evidence_id", type=str, help="Evidence ID (e.g. col-xxx)")
+    audit_ev_p.add_argument("--mock", action="store_true", help="Force mock mode")
+    audit_ev_p.add_argument("--json", action="store_true", help="Output raw JSON")
+
+    audit_inc_p = audit_sub.add_parser("incident", help="Show audit events for a security incident")
+    audit_inc_p.add_argument("incident_id", type=str, help="Incident ID (e.g. 1001)")
+    audit_inc_p.add_argument("--mock", action="store_true", help="Force mock mode")
+    audit_inc_p.add_argument("--json", action="store_true", help="Output raw JSON")
+
     args = parser.parse_args()
 
     # Determine logging level from environment
@@ -647,11 +771,14 @@ def main() -> int:
     client = DefenderClient(config)
     incident_service = IncidentService(client)
     s3_service = S3StorageService(s3_config)
+    catalog_service = EvidenceCatalogService()
+    audit_service = ChainOfCustodyService(db_path=catalog_service.db_path)
+    catalog_service.audit_service = audit_service
     forensic_service = ForensicCollectionService(
         defender_client=client,
         s3_storage_service=s3_service,
+        audit_service=audit_service,
     )
-    catalog_service = EvidenceCatalogService()
     artifact_analyzer = ArtifactAnalyzer()
     alert_correlator = AlertCorrelator()
     orchestrator_pipeline = OrchestratorPipeline(
@@ -662,9 +789,60 @@ def main() -> int:
         catalog_service=catalog_service,
         analyzer=artifact_analyzer,
         correlator=alert_correlator,
+        audit_service=audit_service,
     )
 
-    # 0. End-to-End Orchestrator Pipeline (Days 1 - 4)
+    # 0.0 Day 5: Chain of Custody & Cryptographic Audit Ledger Commands
+    # 0.0.1 Audit Chain Verification
+    if (getattr(args, "subcommand", None) == "audit" and getattr(args, "audit_action", None) == "verify") or args.audit_verify:
+        print("[*] Cryptographically verifying chain-of-custody hash ledger...")
+        verification = audit_service.verify_audit_chain()
+        if args.json:
+            print(json.dumps(verification.to_dict(), indent=2))
+        else:
+            print_audit_verification(verification)
+        return 0 if verification.is_valid else 1
+
+    # 0.0.2 Audit Event Listing
+    if (getattr(args, "subcommand", None) == "audit" and getattr(args, "audit_action", None) == "list") or args.audit_list:
+        limit = getattr(args, "limit", None) or args.audit_limit or 50
+        print(f"[*] Retrieving recent {limit} chain-of-custody audit events...")
+        events = audit_service.list_recent_events(limit=limit)
+        if args.json:
+            print(json.dumps([e.to_dict() for e in events], indent=2))
+        else:
+            print_audit_events(events, title="RECENT CHAIN-OF-CUSTODY AUDIT EVENTS")
+        return 0
+
+    # 0.0.3 Audit Evidence History
+    audit_ev_id = getattr(args, "evidence_id", None) or args.audit_evidence
+    if (getattr(args, "subcommand", None) == "audit" and getattr(args, "audit_action", None) == "evidence") or args.audit_evidence:
+        if not audit_ev_id:
+            print("[-] Error: Evidence ID is required.")
+            return 1
+        print(f"[*] Retrieving chain-of-custody history for evidence '{audit_ev_id}'...")
+        events = audit_service.get_evidence_history(audit_ev_id)
+        if args.json:
+            print(json.dumps([e.to_dict() for e in events], indent=2))
+        else:
+            print_audit_events(events, title=f"EVIDENCE CUSTODY HISTORY: {audit_ev_id}")
+        return 0
+
+    # 0.0.4 Audit Incident History
+    audit_inc_id = getattr(args, "incident_id", None) or args.audit_incident
+    if (getattr(args, "subcommand", None) == "audit" and getattr(args, "audit_action", None) == "incident") or args.audit_incident:
+        if not audit_inc_id:
+            print("[-] Error: Incident ID is required.")
+            return 1
+        print(f"[*] Retrieving chain-of-custody history for incident #{audit_inc_id}...")
+        events = audit_service.get_incident_history(audit_inc_id)
+        if args.json:
+            print(json.dumps([e.to_dict() for e in events], indent=2))
+        else:
+            print_audit_events(events, title=f"INCIDENT AUDIT HISTORY: #{audit_inc_id}")
+        return 0
+
+    # 0. End-to-End Orchestrator Pipeline (Days 1 - 5)
     if args.full_workflow:
         target_inc = args.incident or "1001"
         print(f"[*] Executing End-to-End Orchestrator Pipeline for Incident #{target_inc}...")

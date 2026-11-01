@@ -12,6 +12,7 @@ if str(_ORCHESTRATOR_DIR) not in sys.path:
 from backend.jira_integration import (
     IncidentData,
     IncidentValidationError,
+    JiraAssignmentError,
     JiraAuthenticationError,
     JiraClient,
     JiraConnectionError,
@@ -28,6 +29,7 @@ from backend.jira_integration import (
 __all__ = [
     "IncidentData",
     "IncidentValidationError",
+    "JiraAssignmentError",
     "JiraAuthenticationError",
     "JiraClient",
     "JiraConnectionError",

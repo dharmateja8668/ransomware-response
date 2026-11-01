@@ -1,18 +1,20 @@
 """
-main.py - Day 1 Incident Response Orchestrator & Jira Integration Runner.
+main.py - Day 2 Incident Response Orchestrator & Jira Integration Runner.
 
 Automated Ransomware Containment & Incident Response Orchestrator
-Day 1: Jira Cloud REST API Incident Ticketing Integration (REST API v3).
+Day 2: Severity-Based SOC Analyst Assignment & Priority Routing.
 
-Executes the Day 1 lifecycle:
-1. Connect to Jira Cloud over HTTPS.
-2. Authenticate successfully and verify account credentials (GET /rest/api/3/myself).
-3. Verify target Jira project key for security incidents (GET /rest/api/3/project).
-4. Verify issue type in target project (GET /rest/api/3/project/{key}).
-5. Ingest and validate simulated ransomware incident alert telemetry.
-6. Create a standardized Jira incident ticket (POST /rest/api/3/issue).
-7. Display generated Jira ticket ID, Key, and web browse URL.
-8. Safely handle errors without crashing.
+Executes the Day 2 lifecycle:
+1.  Connect to Jira Cloud over HTTPS.
+2.  Authenticate successfully and verify account credentials (GET /rest/api/3/myself).
+3.  Verify target Jira project key for security incidents (GET /rest/api/3/project).
+4.  Verify issue type in target project (GET /rest/api/3/project/{key}).
+5.  Ingest and validate simulated ransomware incident alert telemetry.
+6.  Create a standardized Jira incident ticket (POST /rest/api/3/issue).
+7.  Display generated Jira ticket ID, Key, and web browse URL.
+8.  Identify incident severity and select SOC analyst via severity routing.
+9.  Auto-assign incident ticket to the selected analyst (PUT /assignee).
+10. Display complete ticket + assignment summary.
 """
 
 import argparse
@@ -33,6 +35,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from backend.config import JiraConfig, audit_configuration, load_config, mask_secret
 from backend.jira_integration import (
     JiraClient,
+    JiraAssignmentError,
     create_incident_ticket,
     JiraIntegrationError,
     JiraAuthenticationError,
@@ -177,10 +180,57 @@ def print_banner() -> None:
     banner = """
 ================================================================================
    AUTOMATED RANSOMWARE CONTAINMENT & INCIDENT RESPONSE ORCHESTRATOR
-   Day 1: Jira Cloud REST API Incident Ticketing Integration (REST API v3)
+   Day 2: Severity-Based SOC Analyst Assignment & Priority Routing (REST API v3)
 ================================================================================
 """
     print(banner)
+
+
+def list_assignable_users(env_file: Optional[str] = None) -> int:
+    """
+    Retrieve and display users assignable to issues in the configured Jira project.
+    Prints a formatted table of displayName, emailAddress, and accountId.
+    Used to help configure the JIRA_*_ASSIGNEE_ACCOUNT_ID environment variables.
+    """
+    print_banner()
+    print("[+] Fetching assignable users from Jira Cloud...\n")
+
+    try:
+        config = load_config(env_file)
+        config.validate()
+        client = JiraClient.from_config(config)
+        users = client.get_assignable_users(config.project_key)
+    except Exception as exc:
+        print(f"  [FAIL] Could not retrieve users: {exc}")
+        return 1
+
+    if not users:
+        print(f"  [!] No assignable users found for project '{config.project_key}'.")
+        print("      Ensure your API token has 'Browse Projects' permission.\n")
+        return 1
+
+    print(f"  [OK] Found {len(users)} assignable user(s) for project [{config.project_key}]:\n")
+    print(f"  {'#':<4}  {'Display Name':<30}  {'Email Address':<35}  {'Account ID'}")
+    print(f"  {'-'*4}  {'-'*30}  {'-'*35}  {'-'*40}")
+    for i, user in enumerate(users, start=1):
+        status = "ACTIVE" if user.get("active") else "INACTIVE"
+        print(
+            f"  {i:<4}  {user['displayName']:<30}  {user['emailAddress']:<35}  "
+            f"{user['accountId']}  [{status}]"
+        )
+
+    print("""
+  ------------------------------------------------------------------------------
+  HOW TO CONFIGURE AUTO-ASSIGNMENT:
+  Copy the accountId values above into your .env file:
+
+    JIRA_CRITICAL_ASSIGNEE_ACCOUNT_ID=<accountId of Senior SOC Lead>
+    JIRA_HIGH_ASSIGNEE_ACCOUNT_ID=<accountId of SOC Analyst Tier 2>
+    JIRA_MEDIUM_ASSIGNEE_ACCOUNT_ID=<accountId of Junior SOC Analyst>
+    JIRA_LOW_ASSIGNEE_ACCOUNT_ID=<accountId of Monitoring Analyst>
+  ------------------------------------------------------------------------------
+""")
+    return 0
 
 
 def run_orchestrator(
@@ -190,8 +240,8 @@ def run_orchestrator(
     env_file: Optional[str] = None,
 ) -> int:
     """
-    Execute the Day 1 Incident Response workflow.
-    
+    Execute the Day 2 Incident Response workflow with severity-based assignment.
+
     Returns 0 on success, non-zero on error.
     """
     print_banner()
@@ -304,7 +354,7 @@ def run_orchestrator(
     print(f"      Detection Timestamp:  {alert_data.get('detection_time')}\n")
 
     # Step 5 & 6: Create Jira Incident Ticket (with Duplicate Avoidance)
-    print("[+] Step 5: Creating Jira Incident Ticket via REST API v3...")
+    print("[+] Step 5 & 6: Creating Jira Incident Ticket via REST API v3...")
     try:
         ticket_result = client.create_incident_ticket(
             incident_id=alert_data["incident_id"],
@@ -334,8 +384,6 @@ def run_orchestrator(
         print(f"  Project Key:             {ticket_result['project_key']}")
         print(f"  Summary:                 {ticket_result['summary']}")
         print("================================================================================\n")
-        print("[OK] Day 1 Objective Accomplished: Automated Jira Incident Response Orchestration.")
-        return 0
 
     except IncidentValidationError as exc:
         print(f"  [FAIL] Telemetry Validation Error: {exc}")
@@ -352,11 +400,76 @@ def run_orchestrator(
         print(f"  [FAIL] Unexpected error during ticket creation: {exc}")
         return 10
 
+    # ── Day 2 Steps 8–10: Severity-Based SOC Analyst Assignment ───────────────
+
+    # Step 8: Identify severity and select SOC analyst
+    incident_severity = ticket_result.get("severity", alert_data.get("severity", "CRITICAL"))
+    ticket_key = ticket_result["ticket_key"]
+
+    print(f"[+] Step 8: Identifying severity and selecting SOC analyst for severity [{incident_severity}]...")
+    assignee_config = config.get_assignee_config()
+
+    severity_routing = {
+        "CRITICAL": "Senior SOC Lead / Incident Commander",
+        "HIGH":     "SOC Analyst (Tier 2)",
+        "MEDIUM":   "Junior SOC Analyst (Tier 1)",
+        "LOW":      "Monitoring Analyst",
+    }
+    print(f"  Severity-Based Routing Table:")
+    for sev, role in severity_routing.items():
+        configured = "[CONFIGURED]" if assignee_config.get(sev) else "[NOT SET]"
+        print(f"    {sev:<10} -> {role:<40} {configured}")
+    print()
+
+    # Step 9: Auto-assign the ticket
+    print(f"[+] Step 9: Auto-assigning ticket [{ticket_key}] to analyst...")
+    if simulate:
+        # In simulation mode, mock the assignment result
+        assignment_result = {
+            "assigned": True,
+            "issue_key": ticket_key,
+            "severity": incident_severity,
+            "account_id": "sim-acc-analyst-001",
+            "reason": "Assignment successful (SIMULATION MODE).",
+        }
+        print(f"  [SIM] Simulated assignment: ticket '{ticket_key}' → analyst 'sim-acc-analyst-001'")
+    else:
+        assignment_result = client.auto_assign_incident(
+            issue_key=ticket_key,
+            severity=incident_severity,
+            assignee_config=assignee_config,
+        )
+
+    if assignment_result["assigned"]:
+        print(f"  [OK] Ticket [{ticket_key}] successfully assigned!")
+        print(f"       Analyst AccountId: {mask_secret(assignment_result['account_id'], visible_chars=8)}")
+    else:
+        print(f"  [WARN] Auto-assignment skipped: {assignment_result['reason']}")
+        print(f"         Ticket [{ticket_key}] remains unassigned.")
+        print(f"         Run: python -m backend.main --list-users  to get valid account IDs.")
+
+    # Step 10: Final summary
+    print()
+    print("================================================================================")
+    print("              DAY 2 - INCIDENT TICKET & ASSIGNMENT SUMMARY                     ")
+    print("================================================================================")
+    print(f"  Ticket Key:              {ticket_result['ticket_key']}")
+    print(f"  Ticket URL:              {ticket_result['ticket_url']}")
+    print(f"  Incident Severity:       {incident_severity}")
+    print(f"  Ticket Status:           {ticket_result['status']}")
+    print(f"  Assignment Status:       {'ASSIGNED' if assignment_result['assigned'] else 'UNASSIGNED'}")
+    if assignment_result["assigned"]:
+        print(f"  Assigned Analyst Role:   {severity_routing.get(incident_severity, 'Unknown')}")
+    print(f"  Assignment Reason:       {assignment_result['reason']}")
+    print("================================================================================\n")
+    print("[OK] Day 2 Objective Accomplished: Severity-Based SOC Analyst Auto-Assignment.")
+    return 0
+
 
 def main() -> None:
     """CLI entrypoint."""
     parser = argparse.ArgumentParser(
-        description="Automated Ransomware Containment & Incident Response Orchestrator - Day 1"
+        description="Automated Ransomware Containment & Incident Response Orchestrator - Day 2"
     )
     parser.add_argument(
         "--simulate",
@@ -368,6 +481,11 @@ def main() -> None:
         "--check-auth",
         action="store_true",
         help="Verify Jira authentication and project access without creating a ticket.",
+    )
+    parser.add_argument(
+        "--list-users",
+        action="store_true",
+        help="List all users assignable to issues in the configured Jira project (for .env configuration).",
     )
     parser.add_argument(
         "--alert-file",
@@ -383,6 +501,10 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+
+    if args.list_users:
+        sys.exit(list_assignable_users(env_file=args.env_file))
+
     exit_code = run_orchestrator(
         simulate=args.simulate,
         check_auth_only=args.check_auth,

@@ -94,6 +94,11 @@ class JiraConfig:
     api_version: str = "3"
     timeout_seconds: int = 10
     verify_ssl: bool = True
+    # Day 2: Severity-based SOC analyst assignment account IDs
+    critical_assignee_account_id: str = ""
+    high_assignee_account_id: str = ""
+    medium_assignee_account_id: str = ""
+    low_assignee_account_id: str = ""
 
     def validate(self) -> None:
         """
@@ -146,6 +151,19 @@ class JiraConfig:
             "api_version": self.api_version,
             "timeout_seconds": self.timeout_seconds,
             "verify_ssl": self.verify_ssl,
+            "critical_assignee_account_id": mask_secret(self.critical_assignee_account_id) if self.critical_assignee_account_id else "[NOT SET]",
+            "high_assignee_account_id": mask_secret(self.high_assignee_account_id) if self.high_assignee_account_id else "[NOT SET]",
+            "medium_assignee_account_id": mask_secret(self.medium_assignee_account_id) if self.medium_assignee_account_id else "[NOT SET]",
+            "low_assignee_account_id": mask_secret(self.low_assignee_account_id) if self.low_assignee_account_id else "[NOT SET]",
+        }
+
+    def get_assignee_config(self) -> dict:
+        """Return severity-to-account-ID mapping for ticket assignment."""
+        return {
+            "CRITICAL": self.critical_assignee_account_id,
+            "HIGH": self.high_assignee_account_id,
+            "MEDIUM": self.medium_assignee_account_id,
+            "LOW": self.low_assignee_account_id,
         }
 
 
@@ -242,5 +260,9 @@ def load_config(env_file: Optional[str] = None) -> JiraConfig:
         api_version=api_version,
         timeout_seconds=timeout_seconds,
         verify_ssl=verify_ssl,
+        critical_assignee_account_id=os.getenv("JIRA_CRITICAL_ASSIGNEE_ACCOUNT_ID", "").strip(),
+        high_assignee_account_id=os.getenv("JIRA_HIGH_ASSIGNEE_ACCOUNT_ID", "").strip(),
+        medium_assignee_account_id=os.getenv("JIRA_MEDIUM_ASSIGNEE_ACCOUNT_ID", "").strip(),
+        low_assignee_account_id=os.getenv("JIRA_LOW_ASSIGNEE_ACCOUNT_ID", "").strip(),
     )
     return config

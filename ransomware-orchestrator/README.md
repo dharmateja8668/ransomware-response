@@ -271,3 +271,50 @@ Incident Description: High-frequency unauthorized file renames with .lockbit ext
 4. **Crash-Resistant Design**:
    - All network exceptions (`Timeout`, `ConnectionError`, `RequestException`) are caught and translated into custom exceptions, ensuring the orchestrator exits cleanly with actionable triage diagnostics.
 
+---
+
+## 11. Day 2: Severity-Based SOC Analyst Auto-Assignment
+
+Day 2 extends the orchestrator with automated incident assignment, routing newly created ransomware tickets to the appropriate incident response personnel according to alert severity.
+
+### Severity-to-Analyst Routing Matrix
+
+| Alert Severity | Target SOC Role | Assignment Mechanism |
+|---|---|---|
+| **CRITICAL** | Senior SOC Lead / Incident Commander | `PUT /rest/api/3/issue/{key}/assignee` |
+| **HIGH** | SOC Analyst (Tier 2) | `PUT /rest/api/3/issue/{key}/assignee` |
+| **MEDIUM** | Junior SOC Analyst (Tier 1) | `PUT /rest/api/3/issue/{key}/assignee` |
+| **LOW** | Monitoring Analyst / Triage Queue | `PUT /rest/api/3/issue/{key}/assignee` |
+
+### Key Methods Added to `JiraClient`:
+- `get_assignable_users(project_key)`: Discovers all users permitted to be assigned issues in the project (`GET /rest/api/3/user/assignable/search?project={key}`).
+- `assign_incident_ticket(issue_key, account_id)`: Assigns a ticket to a user using their Atlassian `accountId` (`PUT /rest/api/3/issue/{key}/assignee`). Jira returns HTTP 204 on success.
+- `select_analyst_for_severity(severity, assignee_config)`: Maps severity level to corresponding analyst account ID from configuration.
+- `auto_assign_incident(issue_key, severity, assignee_config)`: Orchestrates severity routing and ticket assignment with full error recovery.
+
+### Listing Assignable Users via CLI:
+```bash
+python -m backend.main --list-users
+```
+Output:
+```text
+  #     Display Name                    Email Address                        Account ID
+  ----  ------------------------------  -----------------------------------  ----------------------------------------
+  1     pagoti dharmateja               pagotidharmateja000@gmail.com        712020:8104d0f4-4513-498e-a474-954999d59be2  [ACTIVE]
+```
+
+### Environment Configuration for Assignment:
+```env
+JIRA_CRITICAL_ASSIGNEE_ACCOUNT_ID=712020:8104d0f4-4513-498e-a474-954999d59be2
+JIRA_HIGH_ASSIGNEE_ACCOUNT_ID=712020:8104d0f4-4513-498e-a474-954999d59be2
+JIRA_MEDIUM_ASSIGNEE_ACCOUNT_ID=712020:8104d0f4-4513-498e-a474-954999d59be2
+JIRA_LOW_ASSIGNEE_ACCOUNT_ID=712020:8104d0f4-4513-498e-a474-954999d59be2
+```
+
+### Running the Full 34-Test Suite:
+```bash
+pytest tests/test_jira.py -v
+```
+All 22 Day 1 tests and 12 Day 2 tests pass (34/34).
+
+

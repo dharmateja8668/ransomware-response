@@ -66,6 +66,11 @@ class IncidentValidationError(JiraIntegrationError):
     pass
 
 
+class JiraAssignmentError(JiraIntegrationError):
+    """Raised when Jira ticket assignment to an analyst fails."""
+    pass
+
+
 # ==============================================================================
 # Incident Telemetry Validation & Formatting
 # ==============================================================================
@@ -703,6 +708,224 @@ class JiraClient:
             raise JiraTicketCreationError(
                 f"Failed to create Jira ticket (HTTP {response.status_code}): {response.text}"
             )
+
+    # ── Day 2: Analyst Assignment Methods ─────────────────────────────────────
+
+    def get_assignable_users(self, project_key: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        Retrieve the list of users assignable to issues in the given Jira project.
+
+        Calls: GET /rest/api/{api_version}/user/assignable/search?project={key}
+
+        Returns a list of dicts: [{accountId, displayName, emailAddress, active}]
+        Returns an empty list if no users are found (non-fatal).
+        Raises JiraAuthenticationError on 401/403.
+        Raises JiraConnectionError on network failure.
+        """
+        target_key = (project_key or self.project_key).strip().upper()
+        url = f"{self.base_url}/rest/api/{self.api_version}/user/assignable/search"
+        logger.info("Retrieving assignable users for project '%s'...", target_key)
+
+        try:
+            response = self.session.get(
+                url,
+                params={"project": target_key},
+                timeout=self.timeout_seconds,
+                verify=self.verify_ssl,
+            )
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
+            logger.error("Connection failed while fetching assignable users: %s", exc)
+            raise JiraConnectionError(f"Failed to connect to Jira at {self.base_url}: {exc}") from exc
+        except requests.exceptions.RequestException as exc:
+            raise JiraIntegrationError(f"Network error fetching assignable users: {exc}") from exc
+
+        if response.status_code == 200:
+            users = response.json()
+            if not users:
+                logger.warning("No assignable users found for project '%s'.", target_key)
+                return []
+            result = [
+                {
+                    "accountId": u.get("accountId", ""),
+                    "displayName": u.get("displayName", "Unknown"),
+                    "emailAddress": u.get("emailAddress", ""),
+                    "active": u.get("active", False),
+                }
+                for u in users
+            ]
+            logger.info("Found %d assignable user(s) for project '%s'.", len(result), target_key)
+            return result
+        elif response.status_code in (401, 403):
+            raise JiraAuthenticationError(
+                f"Access denied retrieving assignable users (HTTP {response.status_code}). "
+                "Verify your API token has 'Browse Projects' permission."
+            )
+        else:
+            raise JiraIntegrationError(
+                f"Failed to retrieve assignable users (HTTP {response.status_code}): {response.text}"
+            )
+
+    def assign_incident_ticket(self, issue_key: str, account_id: str) -> Dict[str, Any]:
+        """
+        Assign a Jira incident ticket to a specific SOC analyst by their Jira accountId.
+
+        Calls: PUT /rest/api/{api_version}/issue/{issueKey}/assignee
+        Jira returns HTTP 204 No Content on success (no response body).
+
+        Returns a dict: {assigned: bool, issue_key, account_id}
+        Raises JiraAssignmentError on 400 (invalid accountId) or 404 (invalid issue key).
+        Raises JiraAuthenticationError on 401/403.
+        Raises JiraConnectionError on network failure.
+        """
+        if not issue_key or not issue_key.strip():
+            raise JiraAssignmentError("issue_key cannot be empty.")
+        if not account_id or not account_id.strip():
+            raise JiraAssignmentError("account_id cannot be empty. Cannot assign to anonymous user.")
+
+        url = f"{self.base_url}/rest/api/{self.api_version}/issue/{issue_key.strip()}/assignee"
+        logger.info(
+            "Assigning ticket '%s' to analyst with accountId '%s'...",
+            issue_key,
+            mask_secret(account_id, visible_chars=6),
+        )
+
+        try:
+            response = self.session.put(
+                url,
+                json={"accountId": account_id.strip()},
+                timeout=self.timeout_seconds,
+                verify=self.verify_ssl,
+            )
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
+            logger.error("Connection failed while assigning ticket '%s': %s", issue_key, exc)
+            raise JiraConnectionError(f"Failed to connect to Jira at {self.base_url}: {exc}") from exc
+        except requests.exceptions.RequestException as exc:
+            raise JiraIntegrationError(f"Network error while assigning ticket: {exc}") from exc
+
+        if response.status_code == 204:
+            logger.info("Ticket '%s' successfully assigned to accountId '%s'.", issue_key, mask_secret(account_id, 6))
+            return {
+                "assigned": True,
+                "issue_key": issue_key,
+                "account_id": account_id,
+            }
+        elif response.status_code == 400:
+            error_text = response.text or "Invalid accountId or malformed request."
+            logger.error("Assignment rejected (HTTP 400) for ticket '%s': %s", issue_key, error_text)
+            raise JiraAssignmentError(
+                f"Failed to assign ticket '{issue_key}' (HTTP 400): {error_text}. "
+                "Verify the accountId is valid and belongs to an active Jira user."
+            )
+        elif response.status_code == 404:
+            raise JiraAssignmentError(
+                f"Issue key '{issue_key}' not found in Jira (HTTP 404). "
+                "Verify the ticket key is correct."
+            )
+        elif response.status_code in (401, 403):
+            raise JiraAuthenticationError(
+                f"Access denied assigning ticket '{issue_key}' (HTTP {response.status_code}). "
+                "Verify your API token has 'Assign Issues' permission."
+            )
+        else:
+            raise JiraAssignmentError(
+                f"Unexpected Jira response while assigning ticket (HTTP {response.status_code}): {response.text}"
+            )
+
+    def select_analyst_for_severity(
+        self,
+        severity: str,
+        assignee_config: Dict[str, str],
+    ) -> Optional[str]:
+        """
+        Select the appropriate SOC analyst accountId based on incident severity.
+
+        Severity routing:
+            CRITICAL → Senior SOC Analyst / Incident Commander
+            HIGH     → SOC Analyst (Tier 2)
+            MEDIUM   → Junior SOC Analyst (Tier 1)
+            LOW      → Monitoring / Tier 1
+
+        Returns the accountId string, or None if no analyst is configured for that severity.
+        Never assigns randomly — returns None with a warning instead.
+        """
+        clean_severity = severity.strip().upper()
+        account_id = assignee_config.get(clean_severity, "")
+
+        if not account_id or not account_id.strip():
+            logger.warning(
+                "No SOC analyst configured for severity '%s'. "
+                "Ticket will remain unassigned. Set JIRA_%s_ASSIGNEE_ACCOUNT_ID in .env to enable auto-assignment.",
+                clean_severity,
+                clean_severity,
+            )
+            return None
+
+        logger.info(
+            "Selected analyst accountId '%s' for severity '%s'.",
+            mask_secret(account_id, visible_chars=6),
+            clean_severity,
+        )
+        return account_id.strip()
+
+    def auto_assign_incident(
+        self,
+        issue_key: str,
+        severity: str,
+        assignee_config: Dict[str, str],
+    ) -> Dict[str, Any]:
+        """
+        Automatically assign an incident ticket to the appropriate SOC analyst
+        based on the severity routing rules.
+
+        Returns a result dict:
+            {
+                assigned: bool,
+                issue_key: str,
+                severity: str,
+                account_id: str | None,
+                reason: str,
+            }
+        Never raises — failures are captured in the returned dict with assigned=False.
+        """
+        account_id = self.select_analyst_for_severity(severity, assignee_config)
+
+        if account_id is None:
+            return {
+                "assigned": False,
+                "issue_key": issue_key,
+                "severity": severity.upper(),
+                "account_id": None,
+                "reason": f"No analyst account ID configured for severity '{severity.upper()}'. "
+                          f"Set JIRA_{severity.upper()}_ASSIGNEE_ACCOUNT_ID in .env.",
+            }
+
+        try:
+            self.assign_incident_ticket(issue_key, account_id)
+            return {
+                "assigned": True,
+                "issue_key": issue_key,
+                "severity": severity.upper(),
+                "account_id": account_id,
+                "reason": "Assignment successful.",
+            }
+        except JiraAssignmentError as exc:
+            logger.error("Auto-assignment failed for ticket '%s': %s", issue_key, exc)
+            return {
+                "assigned": False,
+                "issue_key": issue_key,
+                "severity": severity.upper(),
+                "account_id": account_id,
+                "reason": str(exc),
+            }
+        except (JiraAuthenticationError, JiraConnectionError) as exc:
+            logger.error("Auto-assignment failed (infrastructure error) for '%s': %s", issue_key, exc)
+            return {
+                "assigned": False,
+                "issue_key": issue_key,
+                "severity": severity.upper(),
+                "account_id": account_id,
+                "reason": str(exc),
+            }
 
 
 # ==============================================================================

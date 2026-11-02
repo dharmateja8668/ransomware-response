@@ -978,6 +978,15 @@ The Week 4 incident response orchestration system is implemented in [`ransomware
     ```bash
     pytest tests/test_slack.py -v
     ```
+- **Day 3 (Task 2)**: Automated Incident Notifications – Jira + Slack Integration (`backend/incident_notifications.py`).
+  - Execute end-to-end simulated incident response and Slack notification workflow:
+    ```bash
+    python -m backend.main --test-notification-workflow
+    ```
+  - Run incident notification test suite (16 tests):
+    ```bash
+    pytest tests/test_incident_notifications.py -v
+    ```
 
 For detailed setup, Slack app creation, webhook authorization, and troubleshooting, see [`ransomware-orchestrator/README.md`](ransomware-orchestrator/README.md).
 

@@ -19,6 +19,7 @@ An automated incident response orchestration module written in Python that autom
 10. [Security & SOC Best Practices](#10-security--soc-best-practices)
 11. [Day 2: Severity-Based SOC Analyst Auto-Assignment](#11-day-2-severity-based-soc-analyst-auto-assignment)
 12. [Week 4 Day 3: Slack Webhook Integration (Task 1)](#12-week-4-day-3-slack-webhook-integration-task-1)
+13. [Week 4 Day 3: Automated Incident Notifications – Jira + Slack Integration (Task 2)](#13-week-4-day-3-automated-incident-notifications--jira--slack-integration-task-2)
 
 ---
 
@@ -425,6 +426,90 @@ Run the mocked test suite (no live messages sent):
 pytest tests/test_slack.py -v
 ```
 All 18 automated unit tests pass.
+
+---
+
+## 13. Week 4 Day 3: Automated Incident Notifications – Jira + Slack Integration (Task 2)
+
+Task 2 unifies Jira Cloud incident response with automated Slack alerting. Whenever ZAALIMA processes a ransomware incident, it creates a Jira incident ticket, routes and assigns the ticket to a SOC analyst based on alert severity, and dispatches an automated, rich Block Kit notification to the SOC Slack channel.
+
+### 1. Unified Incident Response Pipeline
+```text
+           [ EDR Ransomware Alert Telemetry Ingestion ]
+                                ↓
+        [ Indicator Validation (IP, Process Hash, Host) ]
+                                ↓
+        [ Step 5 & 6: Standardized Jira Ticket Creation ]
+          → POST /rest/api/3/issue
+          → Generates Ticket Key (e.g. RR-10) and Browse URL
+                                ↓
+        [ Step 8 & 9: Severity-Based SOC Analyst Routing ]
+          → PUT /rest/api/3/issue/{key}/assignee
+          → Maps CRITICAL → Senior SOC Lead / Incident Commander
+                                ↓
+        [ Step 11: Automated Slack SOC Alert Dispatch ]
+          → IncidentNotificationService.notify_incident()
+          → Constructs Slack Block Kit + Markdown Payload
+          → Delivers via SlackClient (HTTPS Incoming Webhook)
+```
+
+### 2. Severity-Based Visual Alert Indicators
+| Severity Level | Visual Alert Indicator | Assigned SOC Analyst Role |
+|---|---|---|
+| **CRITICAL** | 🔴 Critical Alert | Senior SOC Lead / Incident Commander |
+| **HIGH** | 🟠 High Alert | SOC Analyst (Tier 2) |
+| **MEDIUM** | 🟡 Medium Alert | Junior SOC Analyst (Tier 1) |
+| **LOW** | 🟢 Low Alert | Monitoring Analyst |
+
+### 3. Slack Incident Notification Format
+Example of notification delivered to `#soc-alerts`:
+```text
+🚨 ZAALIMA SECURITY INCIDENT ALERT 🚨 - 🔴 Critical Alert
+
+Incident Details:
+
+Incident ID: INC-2026-001
+Severity: CRITICAL
+Hostname: TEST-WORKSTATION-01
+Source: EDR Detection
+Detection Time: 2026-11-03 10:30:00 UTC
+
+Response Status:
+
+Jira Ticket: RR-10
+Assigned Analyst: Senior SOC Lead / Incident Commander
+Assignment Status: ASSIGNED
+
+Jira Ticket Link:
+https://zaalima.atlassian.net/browse/RR-10
+
+Status: INCIDENT TICKET CREATED AND ASSIGNED
+
+System: ZAALIMA Automated Incident Response Orchestrator
+```
+
+### 4. Resilient Failure Handling Matrix
+| Scenario | Behavior & Operational Safeguard |
+|---|---|
+| **Jira Ticket Creation Fails** | Slack success notification is suppressed; failure is logged and recorded (`JIRA_FAILED`). |
+| **Jira Assignment Fails** | Notification is delivered with `Assignment Status: UNASSIGNED` and includes the Jira ticket URL for manual triage. |
+| **Slack Webhook Fails (HTTP 500 / Network Drop)** | Slack delivery failure is logged (`FAILED`); Jira ticket creation and analyst assignment remain fully preserved. |
+| **Slack Webhook Unconfigured** | Logs `NOT_CONFIGURED`; Jira incident response completes uninterrupted. |
+| **Duplicate Workflow Invocation** | In-memory execution deduplication suppresses duplicate alerts for the same `(incident_id, ticket_key)`. |
+| **Invalid Incident Telemetry** | Malformed alerts missing `incident_id`, `hostname`, or `severity` are rejected before dispatch. |
+
+### 5. Running the Complete Workflow Simulation
+Run the safe end-to-end Jira + Slack notification simulation:
+```bash
+python -m backend.main --test-notification-workflow
+```
+
+### 6. Running the Incident Notification Test Suite
+```bash
+pytest tests/test_incident_notifications.py -v
+```
+All 16 unit and integration tests pass.
+
 
 
 

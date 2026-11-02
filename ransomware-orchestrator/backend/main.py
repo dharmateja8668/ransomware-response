@@ -59,6 +59,12 @@ from backend.slack_integration import (
     SlackHTTPError,
     TEST_NOTIFICATION_TEXT,
 )
+from backend.incident_notifications import (
+    IncidentNotificationService,
+    NotificationServiceError,
+    NotificationValidationError,
+    SEVERITY_INDICATORS,
+)
 
 # Setup logging
 logging.basicConfig(
@@ -252,6 +258,7 @@ def run_orchestrator(
     simulate: bool = False,
     check_auth_only: bool = False,
     alert_file: Optional[str] = None,
+    alert_data_override: Optional[Dict[str, Any]] = None,
     env_file: Optional[str] = None,
 ) -> int:
     """
@@ -347,7 +354,10 @@ def run_orchestrator(
 
     # Step 4: Collect / Ingest Ransomware Alert Telemetry
     print("[+] Step 4: Ingesting simulated ransomware incident telemetry...")
-    if alert_file:
+    if alert_data_override:
+        alert_data = dict(alert_data_override)
+        print("  [OK] Ingested simulated ransomware detection telemetry (override active):")
+    elif alert_file:
         try:
             with open(alert_file, "r", encoding="utf-8") as f:
                 alert_data = json.load(f)
@@ -477,8 +487,92 @@ def run_orchestrator(
         print(f"  Assigned Analyst Role:   {severity_routing.get(incident_severity, 'Unknown')}")
     print(f"  Assignment Reason:       {assignment_result['reason']}")
     print("================================================================================\n")
-    print("[OK] Day 2 Objective Accomplished: Severity-Based SOC Analyst Auto-Assignment.")
+    print("[OK] Day 2 Objective Accomplished: Severity-Based SOC Analyst Auto-Assignment.\n")
+
+    # ── Day 3 Task 2: Step 11 - Automated SOC Slack Incident Notification ────
+    print("[+] Step 11: Dispatching automated incident alert to SOC Slack channel...")
+    slack_config = load_slack_config(env_file=env_file)
+    notif_service = IncidentNotificationService(config=slack_config)
+
+    # Attach role to assignment_result for notification formatting
+    assigned_role = severity_routing.get(incident_severity, "SOC Analyst")
+    if assignment_result.get("assigned"):
+        assignment_result["role"] = assigned_role
+
+    notif_result = notif_service.notify_incident(
+        incident_data=alert_data,
+        ticket_data=ticket_result,
+        assignment_data=assignment_result,
+    )
+
+    print()
+    print("================================================================================")
+    print("                     SLACK INCIDENT NOTIFICATION STATUS                         ")
+    print("================================================================================")
+    print(f"  Delivery Status:         {notif_result['status']}")
+    print(f"  Incident ID:             {notif_result.get('incident_id') or alert_data.get('incident_id')}")
+    print(f"  Jira Ticket:             {notif_result.get('ticket_key') or ticket_result.get('ticket_key')}")
+    if notif_result["status"] == "DELIVERED":
+        print(f"  Slack HTTP Response:     {notif_result.get('slack_response') or 'ok'}")
+        print("  Notification Summary:    Alert posted to SOC channel with Block Kit layout.")
+    elif notif_result["status"] == "NOT_CONFIGURED":
+        print("  Notice:                  SLACK_WEBHOOK_URL is not configured in .env.")
+        print("                           Jira operations completed successfully without Slack.")
+    elif notif_result["status"] == "SKIPPED_DUPLICATE":
+        print("  Notice:                  Duplicate notification suppressed for this execution.")
+    else:
+        print(f"  Notification Error:      {notif_result.get('error')}")
+        print("  Notice:                  Slack notification failed, but Jira ticket and")
+        print("                           analyst assignment remain preserved.")
+    print("================================================================================\n")
+    print("[OK] Day 3 Task 2 Objective Accomplished: Jira + Slack Incident Response Workflow.")
     return 0
+
+
+def run_notification_workflow_test(env_file: Optional[str] = None) -> int:
+    """
+    Execute a safe, end-to-end Jira + Slack incident response workflow simulation.
+    
+    Validates:
+    - Ingesting sample incident INC-2026-001 (CRITICAL)
+    - Creating Jira incident ticket (in simulation mode)
+    - Auto-assigning ticket based on severity to Senior SOC Lead
+    - Dispatching automated Slack notification with formatted Block Kit + mrkdwn
+    - Verifying delivery status and error handling
+    
+    Safe & Non-Destructive:
+    - Never triggers real ransomware commands
+    - Never executes destructive containment actions
+    - Employs simulated Jira client to avoid polluting production Jira
+    """
+    print("\n" + "=" * 80)
+    print("      ZAALIMA - Automated Ransomware Containment & Incident Response Orchestrator")
+    print("           Week 4 Day 3 - Task 2: Jira + Slack Notification Workflow Test        ")
+    print("=" * 80 + "\n")
+    print("[*] Starting end-to-end incident response & notification workflow simulation...")
+    print("[*] Mode: Non-Destructive Simulation (Safe for grading and CI/CD validation).\n")
+
+    test_alert = {
+        "incident_id": "INC-2026-001",
+        "incident_type": "Ransomware (LockBit 3.0)",
+        "severity": "CRITICAL",
+        "hostname": "TEST-WORKSTATION-01",
+        "ip_address": "192.168.1.105",
+        "username": "test_user",
+        "process_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "detection_time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "incident_description": (
+            "Canary tripwire file encrypted on endpoint TEST-WORKSTATION-01. "
+            "High-volume encrypted file renames detected in user profile directory."
+        ),
+        "source": "EDR Detection",
+    }
+
+    return run_orchestrator(
+        simulate=True,
+        alert_data_override=test_alert,
+        env_file=env_file,
+    )
 
 
 def run_slack_test(env_file: Optional[str] = None) -> int:
@@ -574,6 +668,11 @@ def main() -> None:
         help="Test Slack webhook connectivity by sending a test notification to the configured channel.",
     )
     parser.add_argument(
+        "--test-notification-workflow",
+        action="store_true",
+        help="Execute safe end-to-end simulation of Jira ticket creation, auto-assignment, and Slack notification.",
+    )
+    parser.add_argument(
         "--alert-file",
         type=str,
         default=None,
@@ -590,6 +689,9 @@ def main() -> None:
 
     if args.slack_test:
         sys.exit(run_slack_test(env_file=args.env_file))
+
+    if args.test_notification_workflow:
+        sys.exit(run_notification_workflow_test(env_file=args.env_file))
 
     if args.list_users:
         sys.exit(list_assignable_users(env_file=args.env_file))

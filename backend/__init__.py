@@ -29,6 +29,13 @@ from backend.slack_integration import (
     TEST_NOTIFICATION_TEXT,
     send_slack_notification,
 )
+from backend.incident_notifications import (
+    IncidentNotificationService,
+    NotificationServiceError,
+    NotificationValidationError,
+    SEVERITY_INDICATORS,
+    DEFAULT_SEVERITY_ROLES,
+)
 
 __all__ = [
     "JiraConfig",
@@ -50,5 +57,10 @@ __all__ = [
     "SlackHTTPError",
     "TEST_NOTIFICATION_TEXT",
     "send_slack_notification",
+    "IncidentNotificationService",
+    "NotificationServiceError",
+    "NotificationValidationError",
+    "SEVERITY_INDICATORS",
+    "DEFAULT_SEVERITY_ROLES",
 ]
 

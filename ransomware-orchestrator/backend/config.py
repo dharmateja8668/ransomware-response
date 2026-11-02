@@ -30,6 +30,31 @@ def mask_secret(secret: Optional[str], visible_chars: int = 4) -> str:
     return f"{secret[:visible_chars]}...****"
 
 
+def mask_webhook_url(url: Optional[str]) -> str:
+    """
+    Mask a sensitive Slack webhook URL so that it can be safely referenced in logs.
+    
+    Example:
+        mask_webhook_url("https://hooks.slack.com/services/T00000000/B00000000/XXXXX")
+        -> "https://hooks.slack.com/services/...****"
+    """
+    if not url:
+        return "[NOT SET]"
+    url = url.strip()
+    if not url:
+        return "[NOT SET]"
+    try:
+        parsed = urlparse(url)
+        if not parsed.scheme or not parsed.netloc:
+            return "****"
+        base = f"{parsed.scheme}://{parsed.netloc}"
+        if "/services/" in parsed.path:
+            return f"{base}/services/...****"
+        return f"{base}/...****"
+    except Exception:
+        return "****"
+
+
 def _fallback_parse_env(file_path: Path) -> None:
     """Built-in safe parser for .env files when python-dotenv is not installed."""
     try:
@@ -266,3 +291,97 @@ def load_config(env_file: Optional[str] = None) -> JiraConfig:
         low_assignee_account_id=os.getenv("JIRA_LOW_ASSIGNEE_ACCOUNT_ID", "").strip(),
     )
     return config
+
+
+@dataclass
+class SlackConfig:
+    """Configuration container for Slack Incoming Webhook integration."""
+    webhook_url: str = ""
+    channel: str = ""
+    timeout_seconds: int = 10
+    verify_ssl: bool = True
+
+    def validate(self) -> None:
+        """
+        Validate Slack configuration parameters.
+        Enforces HTTPS, non-empty webhook URL, and rejects placeholder values.
+        """
+        if not self.webhook_url or not self.webhook_url.strip():
+            raise ValueError("SLACK_WEBHOOK_URL is required but was not provided.")
+
+        parsed = urlparse(self.webhook_url.strip())
+        if parsed.scheme.lower() != "https":
+            raise ValueError(
+                f"Insecure protocol detected: '{parsed.scheme}'. Slack Webhooks require HTTPS."
+            )
+
+        if not parsed.netloc:
+            raise ValueError("Invalid SLACK_WEBHOOK_URL: Missing domain/host.")
+
+        if self.is_placeholder:
+            raise ValueError(
+                f"Placeholder detected in SLACK_WEBHOOK_URL ('{self.masked_url}'). "
+                "Update with your real Slack Incoming Webhook URL."
+            )
+
+    @property
+    def is_configured(self) -> bool:
+        """Return True if webhook URL is set, valid, and not a placeholder."""
+        if not self.webhook_url or not self.webhook_url.strip():
+            return False
+        try:
+            self.validate()
+            return True
+        except ValueError:
+            return False
+
+    @property
+    def is_placeholder(self) -> bool:
+        """Check if webhook URL contains placeholder tokens."""
+        if not self.webhook_url or not self.webhook_url.strip():
+            return True
+        placeholders = {
+            "hooks.slack.com/services/YOUR/WEBHOOK/URL",
+            "your_slack_webhook_url_here",
+            "T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX",
+            "YOUR_WEBHOOK_URL",
+            "<SLACK_WEBHOOK_URL>",
+        }
+        return any(ph in self.webhook_url for ph in placeholders)
+
+    @property
+    def masked_url(self) -> str:
+        """Return safely masked webhook URL for logging."""
+        return mask_webhook_url(self.webhook_url)
+
+    def safe_dict(self) -> dict:
+        """Return dictionary with webhook URL safely masked."""
+        return {
+            "webhook_url": self.masked_url,
+            "channel": self.channel or "[DEFAULT]",
+            "timeout_seconds": self.timeout_seconds,
+            "verify_ssl": self.verify_ssl,
+            "is_configured": self.is_configured,
+        }
+
+
+def load_slack_config(env_file: Optional[str] = None) -> SlackConfig:
+    """Load Slack configuration from environment variables (loading .env first)."""
+    load_env_file(env_file)
+    webhook_url = os.getenv("SLACK_WEBHOOK_URL", "").strip()
+    channel = os.getenv("SLACK_CHANNEL", "").strip()
+
+    try:
+        timeout_seconds = int(os.getenv("SLACK_TIMEOUT_SECONDS", "10"))
+    except ValueError:
+        timeout_seconds = 10
+
+    verify_ssl_raw = os.getenv("SLACK_VERIFY_SSL", "true").strip().lower()
+    verify_ssl = verify_ssl_raw not in ("false", "0", "no")
+
+    return SlackConfig(
+        webhook_url=webhook_url,
+        channel=channel,
+        timeout_seconds=timeout_seconds,
+        verify_ssl=verify_ssl,
+    )

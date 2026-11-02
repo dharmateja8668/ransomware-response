@@ -3,7 +3,7 @@ Backend package for Automated Ransomware Containment & Incident Response Orchest
 Day 1: Jira Cloud REST API Integration.
 """
 
-from backend.config import JiraConfig, load_config
+from backend.config import JiraConfig, SlackConfig, load_config, load_slack_config
 from backend.jira_integration import (
     JiraClient,
     create_incident_ticket,
@@ -18,10 +18,21 @@ from backend.jira_integration import (
     JiraTicketCreationError,
     IncidentValidationError,
 )
+from backend.slack_integration import (
+    SlackClient,
+    SlackIntegrationError,
+    SlackConfigurationError,
+    SlackConnectionError,
+    SlackHTTPError,
+    TEST_NOTIFICATION_TEXT,
+    send_slack_notification,
+)
 
 __all__ = [
     "JiraConfig",
+    "SlackConfig",
     "load_config",
+    "load_slack_config",
     "JiraClient",
     "create_incident_ticket",
     "format_ticket_summary",
@@ -34,5 +45,12 @@ __all__ = [
     "JiraProjectNotFoundError",
     "JiraTicketCreationError",
     "IncidentValidationError",
+    "SlackClient",
+    "SlackIntegrationError",
+    "SlackConfigurationError",
+    "SlackConnectionError",
+    "SlackHTTPError",
+    "TEST_NOTIFICATION_TEXT",
+    "send_slack_notification",
 ]
 

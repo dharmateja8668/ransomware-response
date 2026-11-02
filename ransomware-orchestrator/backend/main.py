@@ -32,7 +32,14 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from backend.config import JiraConfig, audit_configuration, load_config, mask_secret
+from backend.config import (
+    JiraConfig,
+    SlackConfig,
+    audit_configuration,
+    load_config,
+    load_slack_config,
+    mask_secret,
+)
 from backend.jira_integration import (
     JiraClient,
     JiraAssignmentError,
@@ -43,6 +50,14 @@ from backend.jira_integration import (
     JiraProjectNotFoundError,
     JiraTicketCreationError,
     IncidentValidationError,
+)
+from backend.slack_integration import (
+    SlackClient,
+    SlackIntegrationError,
+    SlackConfigurationError,
+    SlackConnectionError,
+    SlackHTTPError,
+    TEST_NOTIFICATION_TEXT,
 )
 
 # Setup logging
@@ -432,7 +447,7 @@ def run_orchestrator(
             "account_id": "sim-acc-analyst-001",
             "reason": "Assignment successful (SIMULATION MODE).",
         }
-        print(f"  [SIM] Simulated assignment: ticket '{ticket_key}' → analyst 'sim-acc-analyst-001'")
+        print(f"  [SIM] Simulated assignment: ticket '{ticket_key}' -> analyst 'sim-acc-analyst-001'")
     else:
         assignment_result = client.auto_assign_incident(
             issue_key=ticket_key,
@@ -466,6 +481,72 @@ def run_orchestrator(
     return 0
 
 
+def run_slack_test(env_file: Optional[str] = None) -> int:
+    """
+    Execute standalone Slack webhook connectivity test (--slack-test).
+    
+    1. Load environment configuration.
+    2. Verify Slack webhook configuration.
+    3. Send the standardized test notification.
+    4. Display whether the notification succeeded or failed.
+    
+    Strictly isolated: does not trigger ransomware containment or create Jira tickets.
+    """
+    print("\n" + "=" * 80)
+    print("      ZAALIMA - Automated Ransomware Containment & Incident Response Orchestrator")
+    print("               Week 4 Day 3: Slack Webhook Integration Test                     ")
+    print("=" * 80 + "\n")
+
+    # 1. Load environment configuration
+    slack_config = load_slack_config(env_file=env_file)
+    client = SlackClient(config=slack_config)
+
+    # 2. Verify Slack webhook configuration
+    print("[+] Step 1: Validating Slack Webhook Configuration...")
+    print(f"    Webhook Target: {slack_config.masked_url}")
+    print(f"    Timeout:        {slack_config.timeout_seconds}s")
+    print(f"    SSL Verify:     {slack_config.verify_ssl}")
+
+    if not client.check_configuration():
+        print("\n  [FAIL] Slack Webhook is not properly configured.")
+        if not slack_config.webhook_url:
+            print("         Reason: SLACK_WEBHOOK_URL is not set in environment or .env file.")
+        elif slack_config.is_placeholder:
+            print("         Reason: SLACK_WEBHOOK_URL contains default placeholder value.")
+        else:
+            print("         Reason: SLACK_WEBHOOK_URL is invalid (must use HTTPS protocol).")
+        print("         Action: Add your real Slack Incoming Webhook URL to .env:")
+        print("                 SLACK_WEBHOOK_URL=https://hooks.slack.com/services/T.../B.../...\n")
+        print("=" * 80 + "\n")
+        return 1
+
+    print("  [OK] Slack Webhook configuration validated successfully.\n")
+
+    # 3. Send the test notification
+    print("[+] Step 2: Sending test notification to Slack channel...")
+    result = client.send_test_notification()
+
+    # 4. Display whether notification succeeded or failed
+    print()
+    print("=" * 80)
+    print("                     SLACK NOTIFICATION TEST RESULT                            ")
+    print("=" * 80)
+    print(f"  Status:       {'SUCCESS' if result['success'] else 'FAILED'}")
+    print(f"  Target:       {slack_config.masked_url}")
+    print(f"  HTTP Status:  {result.get('status_code') or 'N/A'}")
+    if result["success"]:
+        print("  Message:      ZAALIMA is successfully connected to the SOC Slack channel.")
+        print(f"  Response:     {result.get('response') or 'ok'}")
+        print("=" * 80 + "\n")
+        print("[OK] Slack notification test completed successfully.")
+        return 0
+    else:
+        print(f"  Error:        {result.get('error')}")
+        print("=" * 80 + "\n")
+        print("[FAIL] Slack notification test failed.")
+        return 1
+
+
 def main() -> None:
     """CLI entrypoint."""
     parser = argparse.ArgumentParser(
@@ -488,6 +569,11 @@ def main() -> None:
         help="List all users assignable to issues in the configured Jira project (for .env configuration).",
     )
     parser.add_argument(
+        "--slack-test",
+        action="store_true",
+        help="Test Slack webhook connectivity by sending a test notification to the configured channel.",
+    )
+    parser.add_argument(
         "--alert-file",
         type=str,
         default=None,
@@ -501,6 +587,9 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+
+    if args.slack_test:
+        sys.exit(run_slack_test(env_file=args.env_file))
 
     if args.list_users:
         sys.exit(list_assignable_users(env_file=args.env_file))

@@ -961,3 +961,23 @@ The complete Week 3 incident response orchestration system is implemented in [`r
 - **Day 5**: Cryptographic Chain-of-Custody Audit Ledger, Immutability Triggers & End-to-End Orchestrator Pipeline (`forensic/chain_of_custody.py`, `services/orchestrator_pipeline.py`, `docs/CHAIN_OF_CUSTODY_GUIDE.md`).
 
 For detailed usage, architecture, and CLI specifications, see [`ransomware-response-orchestrator/README.md`](ransomware-response-orchestrator/README.md) and [`ransomware-response-orchestrator/docs/CHAIN_OF_CUSTODY_GUIDE.md`](ransomware-response-orchestrator/docs/CHAIN_OF_CUSTODY_GUIDE.md).
+
+---
+
+## Week 4 -- Jira Cloud & Slack Webhook Incident Integration
+
+The Week 4 incident response orchestration system is implemented in [`ransomware-orchestrator/`](ransomware-orchestrator/):
+- **Day 1**: Jira Cloud REST API Incident Ticketing Integration (`backend/jira_integration.py`).
+- **Day 2**: Severity-Based SOC Analyst Auto-Assignment & Priority Routing (`backend/jira_integration.py`).
+- **Day 3 (Task 1)**: Slack Incoming Webhook Integration & Connectivity Verification (`backend/slack_integration.py`).
+  - Send isolated Slack connectivity test:
+    ```bash
+    python -m backend.main --slack-test
+    ```
+  - Run Slack unit test suite (18 tests):
+    ```bash
+    pytest tests/test_slack.py -v
+    ```
+
+For detailed setup, Slack app creation, webhook authorization, and troubleshooting, see [`ransomware-orchestrator/README.md`](ransomware-orchestrator/README.md).
+

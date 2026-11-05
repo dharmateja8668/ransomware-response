@@ -36,6 +36,12 @@ from backend.incident_notifications import (
     SEVERITY_INDICATORS,
     DEFAULT_SEVERITY_ROLES,
 )
+from backend.ransomware_simulator import (
+    RansomwareSimulator,
+    SEVERITY_INCIDENT_TEMPLATES,
+    mask_report_secrets,
+    run_ransomware_simulation,
+)
 
 __all__ = [
     "JiraConfig",
@@ -62,5 +68,9 @@ __all__ = [
     "NotificationValidationError",
     "SEVERITY_INDICATORS",
     "DEFAULT_SEVERITY_ROLES",
+    "RansomwareSimulator",
+    "SEVERITY_INCIDENT_TEMPLATES",
+    "mask_report_secrets",
+    "run_ransomware_simulation",
 ]
 

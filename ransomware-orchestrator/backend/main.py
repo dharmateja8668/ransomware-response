@@ -65,6 +65,10 @@ from backend.incident_notifications import (
     NotificationValidationError,
     SEVERITY_INDICATORS,
 )
+from backend.ransomware_simulator import (
+    RansomwareSimulator,
+    run_ransomware_simulation,
+)
 
 # Setup logging
 logging.basicConfig(
@@ -673,6 +677,28 @@ def main() -> None:
         help="Execute safe end-to-end simulation of Jira ticket creation, auto-assignment, and Slack notification.",
     )
     parser.add_argument(
+        "--simulate-ransomware",
+        action="store_true",
+        help="Execute safe end-to-end ransomware incident simulation across selected severity.",
+    )
+    parser.add_argument(
+        "--severity",
+        type=str,
+        default="CRITICAL",
+        choices=["CRITICAL", "HIGH", "MEDIUM", "LOW"],
+        help="Incident severity level for ransomware simulation (default: CRITICAL).",
+    )
+    parser.add_argument(
+        "--live-simulation",
+        action="store_true",
+        help="Execute controlled live integration test against real Jira & Slack (requires confirmation).",
+    )
+    parser.add_argument(
+        "--confirm-live",
+        action="store_true",
+        help="Acknowledge and confirm live simulation without interactive prompt.",
+    )
+    parser.add_argument(
         "--alert-file",
         type=str,
         default=None,
@@ -689,6 +715,16 @@ def main() -> None:
 
     if args.slack_test:
         sys.exit(run_slack_test(env_file=args.env_file))
+
+    if args.simulate_ransomware or args.live_simulation:
+        sys.exit(
+            run_ransomware_simulation(
+                severity=args.severity,
+                live=bool(args.live_simulation),
+                env_file=args.env_file,
+                confirm_live=bool(args.confirm_live),
+            )
+        )
 
     if args.test_notification_workflow:
         sys.exit(run_notification_workflow_test(env_file=args.env_file))

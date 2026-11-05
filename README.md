@@ -987,6 +987,24 @@ The Week 4 incident response orchestration system is implemented in [`ransomware
     ```bash
     pytest tests/test_incident_notifications.py -v
     ```
+- **Day 4**: Ransomware Simulation and End-to-End Testing (`backend/ransomware_simulator.py`).
+  - Safe, controlled simulation of the complete 8-stage ZAALIMA incident response lifecycle.
+  - Multi-severity support: `CRITICAL` (Ransomware), `HIGH` (Mass File Modification), `MEDIUM` (Suspicious Process Execution), `LOW` (Unusual Network Activity).
+  - Precise per-stage and total performance measurement using `time.perf_counter()`.
+  - Zero-leak audit report generation saved in `reports/simulations/simulation_report_*.json`.
+  - Execute fully mocked simulation (Default):
+    ```bash
+    python -m backend.main --simulate-ransomware
+    python -m backend.main --simulate-ransomware --severity HIGH
+    ```
+  - Optional controlled live simulation (requires explicit confirmation):
+    ```bash
+    python -m backend.main --live-simulation
+    ```
+  - Run ransomware simulator test suite (22 tests):
+    ```bash
+    pytest tests/test_ransomware_simulator.py -v
+    ```
 
 For detailed setup, Slack app creation, webhook authorization, and troubleshooting, see [`ransomware-orchestrator/README.md`](ransomware-orchestrator/README.md).
 

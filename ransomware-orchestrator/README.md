@@ -510,6 +510,141 @@ pytest tests/test_incident_notifications.py -v
 ```
 All 16 unit and integration tests pass.
 
+---
+
+## Week 4 Day 4: Ransomware Simulation and End-to-End Testing
+
+### 1. Simulation Architecture
+```
+EDR Simulation
+     │
+     ▼
+Incident Generation (CRITICAL / HIGH / MEDIUM / LOW)
+     │
+     ▼
+Incident Validation (SOC Schema & Regex Integrity)
+     │
+     ▼
+Jira Ticket Creation (REST API v3 / ADF Formatting)
+     │
+     ▼
+Automatic Analyst Assignment (Severity-Based Tier Routing)
+     │
+     ▼
+Slack Notification (Block Kit + Plaintext Alerting)
+     │
+     ▼
+Incident Response Logging & Audit Trail
+     │
+     ▼
+End-to-End Performance Measurement & JSON Report Generation
+```
+
+### 2. Supported Severity Levels
+| Severity | Threat Type | Example Incident Description | Default Analyst Role |
+|---|---|---|---|
+| **CRITICAL** | Ransomware | Canary tripwire encrypted, vssadmin shadow copies deleted, rapid multi-directory encryption | Senior SOC Lead / Incident Commander |
+| **HIGH** | Mass File Modification | Suspicious bulk file renames and extensions modified across departmental file shares | SOC Analyst (Tier 2) |
+| **MEDIUM** | Suspicious Process Execution | Base64-encoded PowerShell invocation and certutil utility abuse | Junior SOC Analyst (Tier 1) |
+| **LOW** | Unusual Network Activity | Periodic outbound beaconing to non-standard destination port | Monitoring Analyst |
+
+### 3. Safe Simulation Modes
+1. **Mode A: Fully Mocked Simulation (Default)**:
+   - Uses simulated in-memory Jira and Slack adapters.
+   - Zero external HTTP requests to Jira Cloud or Slack.
+   - Verifies the full 8-stage orchestration logic in < 0.1s.
+2. **Mode B: Controlled Live Integration Test (`--live-simulation`)**:
+   - Explicit command-line opt-in with safety confirmation required.
+   - Creates only 1 test Jira issue in the designated project.
+   - Sends only 1 formatted notification to the configured test Slack channel.
+   - **STRICT SAFETY RESTRICTION**: Never executes actual ransomware, destroys or encrypts files, touches production workstations, isolates endpoints, or suspends real accounts.
+
+### 4. Running Ransomware Simulations
+```bash
+# Default CRITICAL ransomware simulation (fully mocked)
+python -m backend.main --simulate-ransomware
+
+# Run simulation with specific severity
+python -m backend.main --simulate-ransomware --severity HIGH
+python -m backend.main --simulate-ransomware --severity MEDIUM
+python -m backend.main --simulate-ransomware --severity LOW
+
+# Run optional live integration simulation (prompts for confirmation)
+python -m backend.main --live-simulation
+```
+
+### 5. Performance Measurement & Audit Reports
+Durations are measured with Python's monotonic high-resolution clock (`time.perf_counter()`).
+Reports are automatically written to `reports/simulations/simulation_report_<SIMULATION_ID>.json`.
+
+**Sample JSON Report (`reports/simulations/`):**
+```json
+{
+  "simulation_id": "SIM-F65435EB",
+  "incident_id": "INC-2026-001",
+  "threat_type": "Ransomware",
+  "severity": "CRITICAL",
+  "hostname": "TEST-WORKSTATION-01",
+  "ip_address": "192.168.56.101",
+  "username": "test_user",
+  "detection_timestamp": "2026-11-05 18:34:14 UTC",
+  "mode": "MOCKED",
+  "incident_validation": {
+    "valid": true,
+    "status": "VALID",
+    "error": null
+  },
+  "jira_ticket": {
+    "status": "Created",
+    "ticket_id": "10582",
+    "ticket_key": "RR-654",
+    "ticket_url": "https://zaalima.atlassian.net/browse/RR-654",
+    "is_duplicate": false,
+    "error": null
+  },
+  "analyst_assignment": {
+    "status": "ASSIGNED",
+    "assigned": true,
+    "role": "Senior SOC Lead / Incident Commander",
+    "account_id": "sim-...****",
+    "reason": "Assignment successful (simulated)."
+  },
+  "slack_notification": {
+    "status": "DELIVERED",
+    "delivered": true,
+    "message": "Alert posted to SOC channel: 🔴 Critical Alert",
+    "error": null
+  },
+  "performance_metrics": {
+    "detection_time": "2026-11-05 18:34:14 UTC",
+    "processing_start_time": "2026-11-05T18:34:14.923439+00:00",
+    "jira_ticket_creation_seconds": 0.0012,
+    "analyst_assignment_seconds": 0.0008,
+    "slack_notification_seconds": 0.0005,
+    "total_response_time_seconds": 0.0025
+  },
+  "overall_workflow_status": "SUCCESS"
+}
+```
+
+### 6. Security & Credential Protection Guarantee
+- API tokens, passwords, authorization headers, and raw Slack webhook URLs are masked using `mask_report_secrets()` before saving to disk.
+- `.env` files are excluded from Git via `.gitignore`.
+- No actual malware or malicious logic is contained in the simulator.
+
+### 7. Running the Test Suite
+```bash
+# Day 4 test suite (22 tests)
+pytest tests/test_ransomware_simulator.py -v
+
+# Full Week 4 integration test suite (90 tests)
+pytest tests/test_jira.py tests/test_slack.py tests/test_incident_notifications.py tests/test_ransomware_simulator.py -v
+
+# Full project regression suite (444 tests)
+pytest
+```
+
+
 
 
 

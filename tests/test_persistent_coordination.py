@@ -207,15 +207,15 @@ def test_stale_in_progress_lock_reclamation(coordination_test_db):
     target_id = "CRASHED-WORKER-HOST"
     alert_id = "ALERT-CRASH-001"
 
-    # Acquire lock with very short lock timeout (0.1 seconds)
-    acquired = store.acquire_action_lock(action_type, target_id, alert_id, lock_timeout_seconds=0.1)
+    # Acquire lock with short lock timeout (0.5 seconds)
+    acquired = store.acquire_action_lock(action_type, target_id, alert_id, lock_timeout_seconds=0.5)
     assert acquired is True
 
     # Immediate attempt fails
-    assert store.acquire_action_lock(action_type, target_id, alert_id, lock_timeout_seconds=0.1) is False
+    assert store.acquire_action_lock(action_type, target_id, alert_id, lock_timeout_seconds=0.5) is False
 
     # Wait for the lock to become stale
-    time.sleep(0.15)
+    time.sleep(0.55)
 
     # New worker should now be able to reclaim the stale lock!
     reclaimed = store.acquire_action_lock(action_type, target_id, "ALERT-CRASH-RETRY", lock_timeout_seconds=60)

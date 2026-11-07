@@ -1,0 +1,237 @@
+{
+  "evaluation_title": "Automated Ransomware Containment & Incident Response Orchestrator - Performance Evaluation",
+  "evaluated_at": "2026-11-07T10:22:38.937664+00:00",
+  "evaluation_mode": "MOCKED_IN_MEMORY_BENCHMARK",
+  "production_timing_notes": "Benchmark measurements reflect in-memory Python runtime, schema parsing, validation, and dispatch execution. Production live integration involves network roundtrips: Jira Cloud REST API typically requires 250ms - 800ms; Slack Incoming Webhooks typically require 120ms - 400ms. Overall live workflow response is 400ms - 1500ms.",
+  "total_iterations": 80,
+  "iterations_per_severity": 20,
+  "overall_successful_count": 80,
+  "overall_failed_count": 0,
+  "overall_success_rate_percent": 100.0,
+  "overall_complete_workflow_stats": {
+    "min_seconds": 9e-05,
+    "max_seconds": 0.000652,
+    "average_seconds": 0.000145,
+    "median_seconds": 0.00012,
+    "p95_seconds": 0.000255,
+    "std_dev_seconds": 8.6e-05
+  },
+  "overall_stage1_detection_validation_stats": {
+    "min_seconds": 5.1e-05,
+    "max_seconds": 0.000514,
+    "average_seconds": 8.3e-05,
+    "median_seconds": 6.4e-05,
+    "p95_seconds": 0.000155,
+    "std_dev_seconds": 6e-05
+  },
+  "overall_stage2_jira_ticket_creation_stats": {
+    "min_seconds": 2e-06,
+    "max_seconds": 1.1e-05,
+    "average_seconds": 3e-06,
+    "median_seconds": 3e-06,
+    "p95_seconds": 7e-06,
+    "std_dev_seconds": 2e-06
+  },
+  "overall_stage3_analyst_assignment_stats": {
+    "min_seconds": 1e-06,
+    "max_seconds": 1.2e-05,
+    "average_seconds": 2e-06,
+    "median_seconds": 2e-06,
+    "p95_seconds": 4e-06,
+    "std_dev_seconds": 2e-06
+  },
+  "overall_stage4_slack_notification_stats": {
+    "min_seconds": 1e-06,
+    "max_seconds": 4e-06,
+    "average_seconds": 1e-06,
+    "median_seconds": 1e-06,
+    "p95_seconds": 2e-06,
+    "std_dev_seconds": 1e-06
+  },
+  "by_severity": {
+    "CRITICAL": {
+      "iteration_count": 20,
+      "successful_workflow_count": 20,
+      "failed_workflow_count": 0,
+      "success_rate_percent": 100.0,
+      "complete_workflow_stats": {
+        "min_seconds": 0.000144,
+        "max_seconds": 0.000652,
+        "average_seconds": 0.000223,
+        "median_seconds": 0.000171,
+        "p95_seconds": 0.000452,
+        "std_dev_seconds": 0.00013
+      },
+      "stage1_detection_validation_stats": {
+        "min_seconds": 8.1e-05,
+        "max_seconds": 0.000514,
+        "average_seconds": 0.000128,
+        "median_seconds": 9e-05,
+        "p95_seconds": 0.000201,
+        "std_dev_seconds": 9.7e-05
+      },
+      "stage2_jira_ticket_creation_stats": {
+        "min_seconds": 3e-06,
+        "max_seconds": 1.1e-05,
+        "average_seconds": 5e-06,
+        "median_seconds": 4e-06,
+        "p95_seconds": 1.1e-05,
+        "std_dev_seconds": 2e-06
+      },
+      "stage3_analyst_assignment_stats": {
+        "min_seconds": 2e-06,
+        "max_seconds": 5e-06,
+        "average_seconds": 3e-06,
+        "median_seconds": 2e-06,
+        "p95_seconds": 5e-06,
+        "std_dev_seconds": 1e-06
+      },
+      "stage4_slack_notification_stats": {
+        "min_seconds": 1e-06,
+        "max_seconds": 4e-06,
+        "average_seconds": 2e-06,
+        "median_seconds": 1e-06,
+        "p95_seconds": 3e-06,
+        "std_dev_seconds": 1e-06
+      }
+    },
+    "HIGH": {
+      "iteration_count": 20,
+      "successful_workflow_count": 20,
+      "failed_workflow_count": 0,
+      "success_rate_percent": 100.0,
+      "complete_workflow_stats": {
+        "min_seconds": 0.000107,
+        "max_seconds": 0.000324,
+        "average_seconds": 0.000153,
+        "median_seconds": 0.000135,
+        "p95_seconds": 0.000255,
+        "std_dev_seconds": 5.3e-05
+      },
+      "stage1_detection_validation_stats": {
+        "min_seconds": 5.7e-05,
+        "max_seconds": 0.000237,
+        "average_seconds": 9.1e-05,
+        "median_seconds": 7.7e-05,
+        "p95_seconds": 0.000158,
+        "std_dev_seconds": 4.2e-05
+      },
+      "stage2_jira_ticket_creation_stats": {
+        "min_seconds": 2e-06,
+        "max_seconds": 7e-06,
+        "average_seconds": 4e-06,
+        "median_seconds": 3e-06,
+        "p95_seconds": 6e-06,
+        "std_dev_seconds": 1e-06
+      },
+      "stage3_analyst_assignment_stats": {
+        "min_seconds": 1e-06,
+        "max_seconds": 1.2e-05,
+        "average_seconds": 3e-06,
+        "median_seconds": 2e-06,
+        "p95_seconds": 3e-06,
+        "std_dev_seconds": 2e-06
+      },
+      "stage4_slack_notification_stats": {
+        "min_seconds": 1e-06,
+        "max_seconds": 2e-06,
+        "average_seconds": 1e-06,
+        "median_seconds": 1e-06,
+        "p95_seconds": 2e-06,
+        "std_dev_seconds": 0.0
+      }
+    },
+    "MEDIUM": {
+      "iteration_count": 20,
+      "successful_workflow_count": 20,
+      "failed_workflow_count": 0,
+      "success_rate_percent": 100.0,
+      "complete_workflow_stats": {
+        "min_seconds": 9.6e-05,
+        "max_seconds": 0.000153,
+        "average_seconds": 0.000103,
+        "median_seconds": 9.9e-05,
+        "p95_seconds": 0.000114,
+        "std_dev_seconds": 1.3e-05
+      },
+      "stage1_detection_validation_stats": {
+        "min_seconds": 5.4e-05,
+        "max_seconds": 7.7e-05,
+        "average_seconds": 5.7e-05,
+        "median_seconds": 5.6e-05,
+        "p95_seconds": 6e-05,
+        "std_dev_seconds": 5e-06
+      },
+      "stage2_jira_ticket_creation_stats": {
+        "min_seconds": 2e-06,
+        "max_seconds": 4e-06,
+        "average_seconds": 3e-06,
+        "median_seconds": 3e-06,
+        "p95_seconds": 3e-06,
+        "std_dev_seconds": 1e-06
+      },
+      "stage3_analyst_assignment_stats": {
+        "min_seconds": 1e-06,
+        "max_seconds": 6e-06,
+        "average_seconds": 1e-06,
+        "median_seconds": 1e-06,
+        "p95_seconds": 2e-06,
+        "std_dev_seconds": 1e-06
+      },
+      "stage4_slack_notification_stats": {
+        "min_seconds": 1e-06,
+        "max_seconds": 2e-06,
+        "average_seconds": 1e-06,
+        "median_seconds": 1e-06,
+        "p95_seconds": 1e-06,
+        "std_dev_seconds": 0.0
+      }
+    },
+    "LOW": {
+      "iteration_count": 20,
+      "successful_workflow_count": 20,
+      "failed_workflow_count": 0,
+      "success_rate_percent": 100.0,
+      "complete_workflow_stats": {
+        "min_seconds": 9e-05,
+        "max_seconds": 0.000164,
+        "average_seconds": 9.9e-05,
+        "median_seconds": 9.5e-05,
+        "p95_seconds": 0.000123,
+        "std_dev_seconds": 1.7e-05
+      },
+      "stage1_detection_validation_stats": {
+        "min_seconds": 5.1e-05,
+        "max_seconds": 0.000116,
+        "average_seconds": 5.7e-05,
+        "median_seconds": 5.3e-05,
+        "p95_seconds": 6.5e-05,
+        "std_dev_seconds": 1.4e-05
+      },
+      "stage2_jira_ticket_creation_stats": {
+        "min_seconds": 2e-06,
+        "max_seconds": 3e-06,
+        "average_seconds": 2e-06,
+        "median_seconds": 2e-06,
+        "p95_seconds": 3e-06,
+        "std_dev_seconds": 0.0
+      },
+      "stage3_analyst_assignment_stats": {
+        "min_seconds": 1e-06,
+        "max_seconds": 2e-06,
+        "average_seconds": 1e-06,
+        "median_seconds": 1e-06,
+        "p95_seconds": 1e-06,
+        "std_dev_seconds": 0.0
+      },
+      "stage4_slack_notification_stats": {
+        "min_seconds": 1e-06,
+        "max_seconds": 1e-06,
+        "average_seconds": 1e-06,
+        "median_seconds": 1e-06,
+        "p95_seconds": 1e-06,
+        "std_dev_seconds": 0.0
+      }
+    }
+  }
+}

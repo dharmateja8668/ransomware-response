@@ -416,6 +416,7 @@ class RansomwareSimulator:
         )
 
         # Stage 1 & 2: Detection and Ingestion
+        t_detect_val_start = time.perf_counter()
         if incident_data is not None:
             incident = dict(incident_data)
         else:
@@ -452,6 +453,7 @@ class RansomwareSimulator:
             # Workflow terminates immediately on validation failure
             t_total_end = time.perf_counter()
             total_duration = t_total_end - t_total_start
+            detect_val_duration = t_total_end - t_detect_val_start
 
             result = self._build_result_package(
                 simulation_id=simulation_id,
@@ -464,10 +466,12 @@ class RansomwareSimulator:
                 metrics={
                     "detection_time": detection_time,
                     "processing_start_time": processing_start_time,
+                    "incident_detection_validation_seconds": round(detect_val_duration, 6),
+                    "detection_validation_seconds": round(detect_val_duration, 6),
                     "jira_ticket_creation_seconds": 0.0,
                     "analyst_assignment_seconds": 0.0,
                     "slack_notification_seconds": 0.0,
-                    "total_response_time_seconds": round(total_duration, 4),
+                    "total_response_time_seconds": round(total_duration, 6),
                 },
                 workflow_status="FAILED",
             )
@@ -475,6 +479,8 @@ class RansomwareSimulator:
                 self.save_simulation_report(result)
             self._last_result = result
             return result
+
+        detect_val_duration = time.perf_counter() - t_detect_val_start
 
         # Stage 4: Jira Ticket Creation
         t_jira_start = time.perf_counter()
@@ -693,10 +699,12 @@ class RansomwareSimulator:
             metrics={
                 "detection_time": detection_time,
                 "processing_start_time": processing_start_time,
-                "jira_ticket_creation_seconds": round(jira_duration, 4),
-                "analyst_assignment_seconds": round(assign_duration, 4),
-                "slack_notification_seconds": round(slack_duration, 4),
-                "total_response_time_seconds": round(total_duration, 4),
+                "incident_detection_validation_seconds": round(detect_val_duration, 6),
+                "detection_validation_seconds": round(detect_val_duration, 6),
+                "jira_ticket_creation_seconds": round(jira_duration, 6),
+                "analyst_assignment_seconds": round(assign_duration, 6),
+                "slack_notification_seconds": round(slack_duration, 6),
+                "total_response_time_seconds": round(total_duration, 6),
             },
             workflow_status=workflow_status,
         )

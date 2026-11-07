@@ -16,8 +16,9 @@ if _spec and _spec.loader:
     run_slack_test = getattr(_mod, "run_slack_test")
     run_notification_workflow_test = getattr(_mod, "run_notification_workflow_test")
     run_ransomware_simulation = getattr(_mod, "run_ransomware_simulation")
+    run_performance_evaluation = getattr(_mod, "run_performance_evaluation")
 
-__all__ = ["main", "run_orchestrator", "run_slack_test", "run_notification_workflow_test", "run_ransomware_simulation"]
+__all__ = ["main", "run_orchestrator", "run_slack_test", "run_notification_workflow_test", "run_ransomware_simulation", "run_performance_evaluation"]
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,48 @@
+{
+  "simulation_id": "SIM-209E9A74",
+  "incident_id": "INC-2026-001",
+  "threat_type": "Ransomware",
+  "severity": "CRITICAL",
+  "hostname": "TEST-WORKSTATION-01",
+  "ip_address": "192.168.56.101",
+  "username": "test_user",
+  "detection_timestamp": "2026-11-07 16:24:01 UTC",
+  "mode": "MOCKED",
+  "incident_validation": {
+    "valid": true,
+    "status": "VALID",
+    "error": null
+  },
+  "jira_ticket": {
+    "status": "Created",
+    "ticket_id": "10582",
+    "ticket_key": "RR-641",
+    "ticket_url": "https://zaalima.atlassian.net/browse/RR-641",
+    "is_duplicate": false,
+    "error": null
+  },
+  "analyst_assignment": {
+    "status": "ASSIGNED",
+    "assigned": true,
+    "role": "Senior SOC Lead / Incident Commander",
+    "account_id": "sim-...****",
+    "reason": "Assignment successful (simulated)."
+  },
+  "slack_notification": {
+    "status": "DELIVERED",
+    "delivered": true,
+    "message": "Alert posted to SOC channel: \ud83d\udd34 Critical Alert",
+    "error": null
+  },
+  "performance_metrics": {
+    "detection_time": "2026-11-07 16:24:01 UTC",
+    "processing_start_time": "2026-11-07T16:24:01.320820+00:00",
+    "incident_detection_validation_seconds": 0.000364,
+    "detection_validation_seconds": 0.000364,
+    "jira_ticket_creation_seconds": 7e-06,
+    "analyst_assignment_seconds": 3e-06,
+    "slack_notification_seconds": 2e-06,
+    "total_response_time_seconds": 0.000577
+  },
+  "overall_workflow_status": "SUCCESS"
+}

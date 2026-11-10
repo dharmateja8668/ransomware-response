@@ -28,7 +28,7 @@ class ContainmentRequest(BaseModel):
 
 
 @router.get("/devices/{target}/containment-status")
-async def get_device_containment_status(target: str, current_user=Depends(get_current_user)):
+def get_device_containment_status(target: str, current_user=Depends(get_current_user)):
     """Queries CrowdStrike directly to verify live device containment status."""
     try:
         return crowdstrike_service.get_device_containment_status(target)
@@ -37,13 +37,13 @@ async def get_device_containment_status(target: str, current_user=Depends(get_cu
 
 
 @router.get("/status")
-async def get_crowdstrike_status(current_user=Depends(get_current_user)):
+def get_crowdstrike_status(force_refresh: bool = False, current_user=Depends(get_current_user)):
     """Returns the live connection and permission status of CrowdStrike Falcon."""
-    return crowdstrike_service.get_connection_status()
+    return crowdstrike_service.get_connection_status(force_refresh=force_refresh)
 
 
 @router.get("/devices")
-async def list_crowdstrike_devices(
+def list_crowdstrike_devices(
     limit: int = 50,
     current_user=Depends(get_current_user)
 ):
@@ -60,7 +60,7 @@ async def list_crowdstrike_devices(
 
 
 @router.get("/alerts")
-async def list_crowdstrike_alerts(
+def list_crowdstrike_alerts(
     limit: int = 50,
     current_user=Depends(get_current_user)
 ):
@@ -77,7 +77,7 @@ async def list_crowdstrike_alerts(
 
 
 @router.post("/sync")
-async def sync_crowdstrike_data(
+def sync_crowdstrike_data(
     db: Session = Depends(get_db),
     current_user=Depends(require_admin)
 ):
@@ -151,7 +151,7 @@ async def sync_crowdstrike_data(
 
 
 @router.post("/contain")
-async def contain_crowdstrike_device(
+def contain_crowdstrike_device(
     body: ContainmentRequest,
     db: Session = Depends(get_db),
     current_user=Depends(require_admin)
@@ -213,7 +213,7 @@ async def contain_crowdstrike_device(
 
 
 @router.post("/lift")
-async def lift_crowdstrike_containment(
+def lift_crowdstrike_containment(
     body: ContainmentRequest,
     db: Session = Depends(get_db),
     current_user=Depends(require_admin)

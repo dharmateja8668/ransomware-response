@@ -23,6 +23,8 @@ class CrowdStrikeService:
         self._access_token: Optional[str] = None
         self._token_expires_at: float = 0.0
         self._cached_devices: Dict[str, str] = {}  # hostname -> device_id map
+        self._cached_status: Optional[Dict[str, Any]] = None
+        self._status_cached_at: float = 0.0
 
     @property
     def base_url(self) -> str:
@@ -64,7 +66,7 @@ class CrowdStrikeService:
                 token_url,
                 data={"client_id": self.client_id, "client_secret": self.client_secret},
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
-                timeout=12
+                timeout=5
             )
         except Timeout:
             raise TimeoutError("CrowdStrike OAuth2 authentication timed out.")
@@ -99,10 +101,16 @@ class CrowdStrikeService:
             "Content-Type": "application/json"
         }
 
-    def get_connection_status(self) -> dict:
-        """Checks connection status and permissions without executing destructive actions."""
+    def get_connection_status(self, force_refresh: bool = False) -> dict:
+        """Checks connection status and permissions without executing destructive actions.
+        Caches results for 30 seconds to prevent repeated WAN timeout delays on dashboard polls.
+        """
+        now = time.time()
+        if not force_refresh and self._cached_status and (now - self._status_cached_at < 30):
+            return self._cached_status
+
         if not self.is_configured():
-            return {
+            status_data = {
                 "status": "DISCONNECTED",
                 "configured": False,
                 "message": "CrowdStrike credentials (CROWDSTRIKE_CLIENT_ID / SECRET) are not configured.",
@@ -112,11 +120,14 @@ class CrowdStrikeService:
                 "enrolled_hosts_count": 0,
                 "alerts_count": 0
             }
+            self._cached_status = status_data
+            self._status_cached_at = now
+            return status_data
 
         try:
             self.authenticate()
         except PermissionError as e:
-            return {
+            status_data = {
                 "status": "AUTHENTICATION FAILED",
                 "configured": True,
                 "message": str(e),
@@ -126,8 +137,11 @@ class CrowdStrikeService:
                 "enrolled_hosts_count": 0,
                 "alerts_count": 0
             }
+            self._cached_status = status_data
+            self._status_cached_at = now
+            return status_data
         except Exception as e:
-            return {
+            status_data = {
                 "status": "API ERROR",
                 "configured": True,
                 "message": str(e),
@@ -137,6 +151,9 @@ class CrowdStrikeService:
                 "enrolled_hosts_count": 0,
                 "alerts_count": 0
             }
+            self._cached_status = status_data
+            self._status_cached_at = now
+            return status_data
 
         headers = self._get_headers()
         permissions = ["oauth2:authenticated"]
@@ -145,7 +162,7 @@ class CrowdStrikeService:
 
         # Check devices permission
         try:
-            r_dev = requests.get(f"{self.base_url}/devices/queries/devices/v1?limit=1", headers=headers, timeout=8)
+            r_dev = requests.get(f"{self.base_url}/devices/queries/devices/v1?limit=1", headers=headers, timeout=5)
             if r_dev.status_code == 200:
                 permissions.append("devices:read")
                 total = r_dev.json().get("meta", {}).get("pagination", {}).get("total")
@@ -158,7 +175,7 @@ class CrowdStrikeService:
 
         # Check alerts permission
         try:
-            r_alt = requests.get(f"{self.base_url}/alerts/queries/alerts/v1?limit=1", headers=headers, timeout=8)
+            r_alt = requests.get(f"{self.base_url}/alerts/queries/alerts/v1?limit=1", headers=headers, timeout=5)
             if r_alt.status_code == 200:
                 permissions.append("alerts:read")
                 total = r_alt.json().get("meta", {}).get("pagination", {}).get("total")

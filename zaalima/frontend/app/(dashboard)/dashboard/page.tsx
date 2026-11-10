@@ -58,23 +58,56 @@ export default function DashboardPage() {
 
   const loadData = async () => {
     try {
-      const [s, t, sv, ra, eh, cs] = await Promise.all([
+      const results = await Promise.allSettled([
         dashboardAPI.stats(),
         dashboardAPI.timeline(),
         dashboardAPI.severityDistribution(),
         dashboardAPI.recentAlerts(),
         dashboardAPI.endpointHealth(),
-        crowdstrikeAPI.status().catch(() => ({ data: null })),
+        crowdstrikeAPI.status(),
       ]);
-      setStats(s.data);
-      setTimeline(t.data || []);
-      setSeverity(sv.data || []);
-      setRecentAlerts(ra.data || []);
-      setEndpointHealth(eh.data || []);
-      if (cs?.data) setCsStatus(cs.data);
+
+      const [sRes, tRes, svRes, raRes, ehRes, csRes] = results;
+
+      if (sRes.status === "fulfilled") {
+        setStats(sRes.value.data);
+      } else {
+        console.warn("Dashboard stats load error:", sRes.reason);
+      }
+
+      if (tRes.status === "fulfilled") {
+        setTimeline(tRes.value.data || []);
+      } else {
+        console.warn("Dashboard timeline load error:", tRes.reason);
+      }
+
+      if (svRes.status === "fulfilled") {
+        setSeverity(svRes.value.data || []);
+      } else {
+        console.warn("Dashboard severity load error:", svRes.reason);
+      }
+
+      if (raRes.status === "fulfilled") {
+        setRecentAlerts(raRes.value.data || []);
+      } else {
+        console.warn("Dashboard recent alerts load error:", raRes.reason);
+      }
+
+      if (ehRes.status === "fulfilled") {
+        setEndpointHealth(ehRes.value.data || []);
+      } else {
+        console.warn("Dashboard endpoint health load error:", ehRes.reason);
+      }
+
+      if (csRes.status === "fulfilled" && csRes.value?.data) {
+        setCsStatus(csRes.value.data);
+      } else if (csRes.status === "rejected") {
+        console.warn("CrowdStrike status load error:", csRes.reason);
+      }
+
       setLastUpdated(new Date());
     } catch (e) {
-      console.error("Dashboard data load error:", e);
+      console.error("Dashboard unexpected load error:", e);
     } finally {
       setLoading(false);
     }

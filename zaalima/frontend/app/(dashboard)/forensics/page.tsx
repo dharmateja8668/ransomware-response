@@ -605,41 +605,43 @@ export default function ForensicsPage() {
           <table className="w-full text-xs text-left">
             <thead className="bg-soc-bg text-soc-muted text-[10px] uppercase font-mono border-b border-soc-border">
               <tr>
-                <th className="px-5 py-3.5">Evidence ID</th>
-                <th className="px-5 py-3.5">Incident ID</th>
-                <th className="px-5 py-3.5">Hostname</th>
-                <th className="px-5 py-3.5">Artifact Type</th>
+                <th className="px-5 py-3.5">Evidence ID & Filename</th>
+                <th className="px-5 py-3.5">Host / Incident</th>
+                <th className="px-5 py-3.5">Acquisition Type</th>
                 <th className="px-5 py-3.5">SHA-256 Checksum</th>
-                <th className="px-5 py-3.5">Package Size</th>
-                <th className="px-5 py-3.5">Storage Standard</th>
+                <th className="px-5 py-3.5">Simulation Status</th>
+                <th className="px-5 py-3.5">Storage Vault</th>
                 <th className="px-5 py-3.5 text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-soc-border">
               {loading ? (
                 <tr>
-                  <td colSpan={8} className="py-12 text-center text-soc-muted">
+                  <td colSpan={7} className="py-12 text-center text-soc-muted">
                     <div className="inline-block w-6 h-6 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mb-2" />
                     <p className="font-mono">Loading forensic evidence packages...</p>
                   </td>
                 </tr>
               ) : evidenceList.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="py-12 text-center text-soc-muted">
+                  <td colSpan={7} className="py-12 text-center text-soc-muted">
                     No evidence packages captured yet. Trigger KAPE triage or Volatility analysis above.
                   </td>
                 </tr>
               ) : (
                 evidenceList.map((ev) => (
                   <tr key={ev.evidence_id} className="hover:bg-soc-border/30 transition-colors">
-                    <td className="px-5 py-3.5 font-mono text-[11px] text-blue-600 dark:text-blue-400 font-bold">
-                      {ev.evidence_id}
-                    </td>
-                    <td className="px-5 py-3.5 font-mono text-[11px] text-soc-muted">
-                      {ev.incident_id || "—"}
+                    <td className="px-5 py-3.5">
+                      <span className="font-mono text-[11px] text-blue-600 dark:text-blue-400 font-bold block">
+                        {ev.evidence_id}
+                      </span>
+                      <span className="font-mono text-[10px] text-soc-muted block truncate max-w-[160px]" title={ev.file_name}>
+                        {ev.file_name || `${ev.evidence_id}.zip`}
+                      </span>
                     </td>
                     <td className="px-5 py-3.5 font-mono text-soc-text font-semibold">
-                      {ev.hostname}
+                      <div>{ev.hostname}</div>
+                      <div className="text-[10px] text-soc-muted font-normal">{ev.incident_id || "Unlinked"}</div>
                     </td>
                     <td className="px-5 py-3.5">
                       <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/30">
@@ -652,18 +654,29 @@ export default function ForensicsPage() {
                     >
                       {ev.file_hash_sha256 ? `${ev.file_hash_sha256.substring(0, 12)}...` : "—"}
                     </td>
-                    <td className="px-5 py-3.5 font-mono text-[11px] text-soc-muted">
-                      {formatBytes(ev.file_size_bytes)}
+                    <td className="px-5 py-3.5">
+                      {ev.is_simulated || !ev.s3_bucket ? (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/30">
+                          <AlertCircle className="w-3 h-3" />
+                          SIMULATED_TRIAGE
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30">
+                          <CheckCircle className="w-3 h-3" />
+                          REAL_HOST_COLLECTION
+                        </span>
+                      )}
                     </td>
                     <td className="px-5 py-3.5">
                       {ev.s3_bucket ? (
                         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30">
                           <Cloud className="w-3 h-3" />
-                          S3 AES-256
+                          AWS S3 WORM
                         </span>
                       ) : (
-                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-mono font-bold capitalize bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/30">
-                          {ev.collection_status || "local_staged"}
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/30">
+                          <HardDrive className="w-3 h-3" />
+                          Local Vault Staging
                         </span>
                       )}
                     </td>
@@ -723,17 +736,33 @@ export default function ForensicsPage() {
                   <p className="font-mono text-blue-600 dark:text-blue-400 mt-0.5 font-bold">{selectedEvidence.incident_id || "Unlinked"}</p>
                 </div>
                 <div>
-                  <span className="text-soc-muted">Type:</span>
-                  <p className="text-soc-text font-mono mt-0.5">{selectedEvidence.evidence_type}</p>
+                  <span className="text-soc-muted">Acquisition Type:</span>
+                  <p className="text-soc-text font-mono mt-0.5 font-semibold">{selectedEvidence.evidence_type}</p>
                 </div>
                 <div>
                   <span className="text-soc-muted">Package Size:</span>
                   <p className="text-soc-text font-mono mt-0.5">{formatBytes(selectedEvidence.file_size_bytes)}</p>
                 </div>
+                <div className="col-span-2">
+                  <span className="text-soc-muted">Forensic Integrity & Simulation Status:</span>
+                  <div className="mt-1">
+                    {selectedEvidence.is_simulated || !selectedEvidence.s3_bucket ? (
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-mono font-bold bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/30">
+                        <AlertCircle className="w-3.5 h-3.5" />
+                        SIMULATED_TRIAGE_PACKAGE (Mock RAM/Triage Fallback, Zero Host Disruption)
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-mono font-bold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30">
+                        <CheckCircle className="w-3.5 h-3.5" />
+                        REAL_HOST_COLLECTION (Physical Memory / Full Disk / KAPE)
+                      </span>
+                    )}
+                  </div>
+                </div>
               </div>
 
               <div>
-                <span className="text-soc-muted">File Name:</span>
+                <span className="text-soc-muted">Evidence File Name:</span>
                 <p className="font-mono text-soc-text bg-soc-bg p-2 rounded border border-soc-border mt-0.5 break-all">
                   {selectedEvidence.file_name}
                 </p>
@@ -741,27 +770,39 @@ export default function ForensicsPage() {
 
               {selectedEvidence.file_hash_sha256 && (
                 <div>
-                  <span className="text-soc-muted">Cryptographic Hash (SHA-256):</span>
-                  <p className="font-mono text-emerald-600 dark:text-emerald-400 bg-soc-bg p-2 rounded border border-soc-border mt-0.5 break-all">
+                  <span className="text-soc-muted">Streaming Checksum (SHA-256):</span>
+                  <p className="font-mono text-emerald-600 dark:text-emerald-400 bg-soc-bg p-2 rounded border border-soc-border mt-0.5 break-all font-bold">
                     {selectedEvidence.file_hash_sha256}
                   </p>
                 </div>
               )}
 
-              {selectedEvidence.s3_bucket && (
-                <div className="bg-soc-bg p-3 rounded-lg border border-emerald-500/30">
-                  <span className="text-emerald-600 dark:text-emerald-400 font-bold flex items-center gap-1.5 font-mono">
-                    <Cloud className="w-4 h-4" />
-                    AWS S3 Secure Vault
-                  </span>
-                  <p className="font-mono text-soc-text mt-1 text-[11px]">
-                    s3://{selectedEvidence.s3_bucket}/{selectedEvidence.s3_key}
-                  </p>
-                  <p className="text-soc-muted text-[10px] mt-0.5 font-mono">
-                    Enforced Encryption: AES-256 (SSE-S3)
-                  </p>
-                </div>
-              )}
+              <div className="bg-soc-bg p-3 rounded-lg border border-soc-border">
+                <span className="text-soc-muted font-mono text-[11px] block mb-1">
+                  Storage Vault Location & Object Lock:
+                </span>
+                {selectedEvidence.s3_bucket ? (
+                  <div>
+                    <span className="text-emerald-600 dark:text-emerald-400 font-bold flex items-center gap-1.5 font-mono">
+                      <Cloud className="w-4 h-4" />
+                      AWS S3 Cloud Vault (Enforced SSE-S3 AES-256)
+                    </span>
+                    <p className="font-mono text-soc-text mt-1 text-[11px]">
+                      s3://{selectedEvidence.s3_bucket}/{selectedEvidence.s3_key}
+                    </p>
+                  </div>
+                ) : (
+                  <div>
+                    <span className="text-blue-600 dark:text-blue-400 font-bold flex items-center gap-1.5 font-mono">
+                      <HardDrive className="w-4 h-4" />
+                      Local Evidence Vault (Simulated WORM Object Lock Staging)
+                    </span>
+                    <p className="font-mono text-soc-text mt-1 text-[11px]">
+                      d:/ransomware response/zaalima/backend/storage/evidence_vault/{selectedEvidence.file_name || `${selectedEvidence.evidence_id}.zip`}
+                    </p>
+                  </div>
+                )}
+              </div>
 
               {/* Chain of Custody */}
               <div className="border-t border-soc-border pt-3">

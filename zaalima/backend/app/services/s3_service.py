@@ -10,9 +10,10 @@ import time
 import hashlib
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional, Dict, Any
+import secrets
 
 from app.core.config import get_settings
 
@@ -38,25 +39,29 @@ class S3EvidenceStorageService:
 
     @property
     def bucket_name(self) -> str:
-        return settings.s3_evidence_bucket or "zaalima-forensic-evidence"
+        return os.environ.get("S3_EVIDENCE_BUCKET") or settings.s3_evidence_bucket or "zaalima-forensic-evidence"
 
     @property
     def region(self) -> str:
-        return settings.aws_region or "us-east-1"
+        return os.environ.get("AWS_REGION") or settings.aws_region or "us-east-1"
 
     @property
     def has_credentials(self) -> bool:
-        return bool(settings.aws_access_key_id and settings.aws_secret_access_key)
+        key_id = os.environ.get("AWS_ACCESS_KEY_ID") or settings.aws_access_key_id
+        secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY") or settings.aws_secret_access_key
+        return bool(key_id and secret_key)
 
     def _get_boto3_client(self):
         if not self.has_credentials:
             return None
         if self._s3_client is None:
             import boto3
+            key_id = os.environ.get("AWS_ACCESS_KEY_ID") or settings.aws_access_key_id
+            secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY") or settings.aws_secret_access_key
             self._s3_client = boto3.client(
                 "s3",
-                aws_access_key_id=settings.aws_access_key_id,
-                aws_secret_access_key=settings.aws_secret_access_key,
+                aws_access_key_id=key_id,
+                aws_secret_access_key=secret_key,
                 region_name=self.region
             )
         return self._s3_client
@@ -95,6 +100,49 @@ class S3EvidenceStorageService:
                 "message": f"AWS S3 error: {str(e)}"
             }
 
+    def get_object_lock_configuration(self) -> dict:
+        """Retrieves Object Lock and WORM retention policy configuration for the bucket."""
+        if not self.has_credentials:
+            return {
+                "status": "MOCK_WORM_ENABLED",
+                "real_aws": False,
+                "bucket": self.bucket_name,
+                "object_lock_enabled": True,
+                "default_retention_mode": "COMPLIANCE",
+                "default_retention_days": 365,
+                "message": "Simulated WORM compliance enabled for local secure vault storage.",
+            }
+
+        client = self._get_boto3_client()
+        try:
+            resp = client.get_object_lock_configuration(Bucket=self.bucket_name)
+            rule = resp.get("ObjectLockConfiguration", {}).get("Rule", {}).get("DefaultRetention", {})
+            return {
+                "status": "ENABLED",
+                "real_aws": True,
+                "bucket": self.bucket_name,
+                "object_lock_enabled": True,
+                "default_retention_mode": rule.get("Mode", "COMPLIANCE"),
+                "default_retention_days": rule.get("Days", 365),
+                "message": f"AWS S3 Object Lock active in {rule.get('Mode', 'COMPLIANCE')} mode.",
+            }
+        except Exception as exc:
+            # Bucket may not have Object Lock enabled at creation
+            return {
+                "status": "NOT_CONFIGURED",
+                "real_aws": True,
+                "bucket": self.bucket_name,
+                "object_lock_enabled": False,
+                "default_retention_mode": "NONE",
+                "default_retention_days": 0,
+                "message": f"S3 Object Lock not enabled on bucket: {exc}",
+            }
+
+    def verify_evidence_integrity(self, file_path: str, expected_sha256: str) -> bool:
+        """Cryptographically verifies that a local or downloaded evidence file matches expected SHA-256."""
+        computed = calculate_sha256(file_path)
+        return secrets.compare_digest(computed.lower(), expected_sha256.lower())
+
     def upload_evidence_file(
         self,
         local_path: str,
@@ -102,9 +150,12 @@ class S3EvidenceStorageService:
         hostname: str,
         evidence_type: str,
         evidence_id: str,
-        analyst_notes: Optional[str] = None
+        analyst_notes: Optional[str] = None,
+        enable_object_lock: bool = True,
+        retention_days: int = 365,
+        lock_mode: str = "COMPLIANCE",
     ) -> dict:
-        """Uploads a forensic evidence package with AES256 encryption and SHA-256 hash."""
+        """Uploads a forensic evidence package with AES256 encryption, WORM Object Lock, and SHA-256 integrity verification."""
         p = Path(local_path)
         if not p.is_file():
             # Create a staging file if it does not exist (for mock/triage runs)
@@ -120,6 +171,17 @@ class S3EvidenceStorageService:
         clean_inc = incident_id.replace("/", "-").replace("\\", "-")
         object_key = f"incidents/{clean_inc}/evidence/{evidence_id}/{p.name}"
         meta_key = f"incidents/{clean_inc}/evidence/{evidence_id}/{p.stem}_metadata.json"
+        now_dt = datetime.now(timezone.utc)
+        retain_until_dt = now_dt + timedelta(days=retention_days)
+
+        object_lock_info = {
+            "enabled": enable_object_lock,
+            "mode": lock_mode,
+            "retention_period_days": retention_days,
+            "retain_until": retain_until_dt.isoformat(),
+            "worm_compliant": True,
+            "simulated": not self.has_credentials,
+        }
 
         metadata_doc = {
             "evidence_id": evidence_id,
@@ -130,29 +192,46 @@ class S3EvidenceStorageService:
             "file_size_bytes": file_size,
             "sha256_checksum": sha256_hash,
             "server_side_encryption": "AES256",
-            "uploaded_at": datetime.now(timezone.utc).isoformat(),
+            "object_lock": object_lock_info,
+            "uploaded_at": now_dt.isoformat(),
             "analyst_notes": analyst_notes or "",
-            "simulation_indicator": not self.has_credentials
+            "simulation_indicator": not self.has_credentials,
         }
 
         # Real AWS S3 Upload
         if self.has_credentials:
             client = self._get_boto3_client()
             try:
-                # Upload artifact with AES256 server-side encryption & metadata tags
+                put_kwargs = {
+                    "Bucket": self.bucket_name,
+                    "Key": object_key,
+                    "ServerSideEncryption": "AES256",
+                    "Metadata": {
+                        "sha256": sha256_hash,
+                        "incident-id": clean_inc,
+                        "hostname": hostname,
+                        "evidence-type": evidence_type,
+                    },
+                }
+
+                # Apply WORM Object Lock if requested
+                if enable_object_lock:
+                    put_kwargs["ObjectLockMode"] = lock_mode
+                    put_kwargs["ObjectLockRetainUntilDate"] = retain_until_dt
+
                 with open(p, "rb") as f:
-                    client.put_object(
-                        Bucket=self.bucket_name,
-                        Key=object_key,
-                        Body=f,
-                        ServerSideEncryption="AES256",
-                        Metadata={
-                            "sha256": sha256_hash,
-                            "incident-id": clean_inc,
-                            "hostname": hostname,
-                            "evidence-type": evidence_type,
-                        }
-                    )
+                    put_kwargs["Body"] = f
+                    try:
+                        client.put_object(**put_kwargs)
+                    except Exception as lock_err:
+                        # Fallback without ObjectLock parameters if bucket does not have ObjectLock enabled
+                        logger.warning("ObjectLock put failed (%s). Retrying standard AES256 upload.", lock_err)
+                        put_kwargs.pop("ObjectLockMode", None)
+                        put_kwargs.pop("ObjectLockRetainUntilDate", None)
+                        f.seek(0)
+                        client.put_object(**put_kwargs)
+                        object_lock_info["worm_compliant"] = False
+                        object_lock_info["note"] = "Bucket lacks ObjectLock; standard AES256 applied"
 
                 # Upload companion JSON manifest
                 client.put_object(
@@ -160,7 +239,7 @@ class S3EvidenceStorageService:
                     Key=meta_key,
                     Body=json.dumps(metadata_doc, indent=2).encode("utf-8"),
                     ContentType="application/json",
-                    ServerSideEncryption="AES256"
+                    ServerSideEncryption="AES256",
                 )
 
                 logger.info(f"REAL AWS S3: Uploaded evidence {evidence_id} to s3://{self.bucket_name}/{object_key}")
@@ -176,7 +255,8 @@ class S3EvidenceStorageService:
                     "sha256_checksum": sha256_hash,
                     "encryption": "AES256 (SSE-S3)",
                     "checksum_verified": True,
-                    "uploaded_at": metadata_doc["uploaded_at"]
+                    "object_lock": object_lock_info,
+                    "uploaded_at": metadata_doc["uploaded_at"],
                 }
             except Exception as e:
                 logger.error(f"AWS S3 upload failed: {e}")
@@ -188,7 +268,7 @@ class S3EvidenceStorageService:
             with open(vault_dir / f"{p.stem}_metadata.json", "w") as mf:
                 json.dump(metadata_doc, mf, indent=2)
 
-            logger.info(f"MOCK S3 VAULT: Staged evidence {evidence_id} with SHA-256: {sha256_hash[:16]}...")
+            logger.info(f"MOCK S3 VAULT: Staged evidence {evidence_id} with SHA-256: {sha256_hash[:16]}... (WORM: {lock_mode})")
             return {
                 "success": True,
                 "real_aws": False,
@@ -201,7 +281,8 @@ class S3EvidenceStorageService:
                 "sha256_checksum": sha256_hash,
                 "encryption": "AES256 (SSE-S3 Staged)",
                 "checksum_verified": True,
-                "uploaded_at": metadata_doc["uploaded_at"]
+                "object_lock": object_lock_info,
+                "uploaded_at": metadata_doc["uploaded_at"],
             }
 
 

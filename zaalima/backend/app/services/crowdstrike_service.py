@@ -73,10 +73,23 @@ class CrowdStrikeService:
         except ConnectionError as e:
             raise ConnectionError(f"Cannot reach CrowdStrike API at {token_url}: {e}")
 
-        if resp.status_code == 401:
+        if resp.status_code == 400:
+            err_detail = "Bad Request (HTTP 400)"
+            try:
+                err_json = resp.json()
+                if "errors" in err_json and err_json["errors"]:
+                    err_detail = err_json["errors"][0].get("message", err_detail)
+            except Exception:
+                pass
+            raise PermissionError(
+                f"CrowdStrike authentication rejected (HTTP 400): {err_detail}. "
+                "The configured Client ID is inactive, expired, or unrecognized on this Falcon cloud region. "
+                "Please verify or renew API credentials in Falcon Console (Support and resources > API clients and keys)."
+            )
+        elif resp.status_code == 401:
             raise PermissionError("CrowdStrike authentication failed (HTTP 401). Invalid Client ID or Secret.")
         elif resp.status_code == 403:
-            raise PermissionError("CrowdStrike authentication forbidden (HTTP 403).")
+            raise PermissionError("CrowdStrike authentication forbidden (HTTP 403). Verify API client permissions.")
 
         try:
             resp.raise_for_status()

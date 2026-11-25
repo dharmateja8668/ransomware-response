@@ -46,6 +46,7 @@ from containment.identity_response import (
     process_coordinated_response_workflow,
 )
 from containment.network_containment import execute_network_containment
+from containment.incident_orchestrator import execute_full_incident_response_workflow
 from integrations.alert_parser import AlertParsingError, parse_and_enrich_alert
 from security.auth import (
     AuthenticatedIdentity,
@@ -193,20 +194,18 @@ def receive_edr_webhook(
     _auth: str = Depends(verify_webhook_secret),
 ) -> dict:
     """
-    Secure webhook endpoint for receiving simulated EDR alerts and coordinating
-    automated containment workflows (Week 2 Day 3).
-
-    Workflow:
-      1. Authenticates request via shared secret in headers (constant-time verification).
-      2. Validates JSON payload against the Alert model (required & optional fields).
-      3. Extracts essential fields and safely logs alert metadata (no secrets logged).
-      4. Stores the incoming alert as an incident record in SQLite (idempotent for retries).
-      5. Passes normalized alert data to the containment decision and EDR execution coordinator.
-      6. Enforces safe dry-run simulation mode by default.
-      7. Transitions incident status in SQLite store based on containment outcome.
-      8. Returns structured confirmation acknowledgement with containment telemetry.
+    Secure webhook endpoint for receiving simulated and live EDR alerts and coordinating
+    the complete 9-stage incident response workflow:
+      1. Ingestion & Secret Verification (constant-time verification).
+      2. Telemetry Normalization & Indicator Validation.
+      3. Safe Network Containment Playbook Execution.
+      4. Forensic Evidence Collection (KAPE artifacts & streaming SHA-256).
+      5. Secure AWS S3 Archival (or explicit vault staging if credentials missing).
+      6. Cryptographic Chain-of-Custody Recording.
+      7. Standardized Jira Incident Ticket Creation & Severity Auto-Assignment.
+      8. Automated Slack Real-Time Alert Dispatch with Ticket Browse Links.
+      9. Full Workflow Status, Audit Trail, and Incident Lifecycle Recording.
     """
-    # Safe logging of alert details without exposing sensitive auth tokens
     logger.info(
         "EDR Webhook alert received safely: alert_id=%s, threat_type=%s, severity=%d, hostname=%s, endpoint_id=%s, ip_address=%s",
         alert.alert_id,
@@ -216,8 +215,7 @@ def receive_edr_webhook(
         alert.endpoint_id or "N/A",
         alert.ip_address or "N/A",
     )
-
-    # Parse, normalize, and enrich the incoming alert payload safely
+    # Parse, normalize, and enrich incoming alert
     try:
         parsed_alert = parse_and_enrich_alert(alert)
     except AlertParsingError as parse_err:
@@ -253,7 +251,7 @@ def receive_edr_webhook(
             process_hash=parsed_alert.process_hash,
             status=IncidentStatus.NEW,
         )
-        stored = create_incident(incident_create)
+        create_incident(incident_create)
     except IncidentDuplicateError:
         logger.info("Webhook alert_id=%s already recorded.", parsed_alert.alert_id)
         return {
@@ -270,26 +268,12 @@ def receive_edr_webhook(
             detail="Failed to store incident record securely.",
         )
 
-    # Week 2 Day 3: Execute containment workflow for ingested alert
-    containment_payload = parsed_alert.to_dict()
-    if alert.endpoint_id:
-        containment_payload["endpoint_id"] = alert.endpoint_id
-
-    containment_res = execute_network_containment(containment_payload, dry_run=dry_run)
-
-    # Refresh incident status from SQLite to reflect any transition (e.g. to CONTAINED or INVESTIGATING)
-    refreshed = get_incident_by_alert_id(parsed_alert.alert_id)
-    current_status = refreshed.status.value if refreshed else stored.status.value
-
-    return {
-        "status": "received",
-        "alert_id": parsed_alert.alert_id,
-        "message": f"EDR webhook alert '{parsed_alert.alert_id}' of type '{parsed_alert.threat_type}' processed successfully.",
-        "threat_type": parsed_alert.threat_type,
-        "severity": parsed_alert.severity,
-        "incident_status": current_status,
-        "containment": containment_res,
-    }
+    # Execute complete incident response workflow
+    return execute_full_incident_response_workflow(
+        alert=alert,
+        dry_run=dry_run,
+        skip_duplicate_check=True,
+    )
 
 
 # ── Week 5 Day 2 Incident Endpoints ──────────────────────────────────────────

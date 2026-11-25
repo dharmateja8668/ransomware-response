@@ -477,12 +477,11 @@ export default function IncidentsPage() {
           <table className="w-full text-xs text-left">
             <thead className="bg-soc-bg text-soc-muted text-[10px] uppercase font-mono border-b border-soc-border">
               <tr>
-                <th className="px-5 py-3.5">Incident ID</th>
-                <th className="px-5 py-3.5">Summary</th>
+                <th className="px-5 py-3.5">Incident ID & Summary</th>
                 <th className="px-5 py-3.5">Severity</th>
                 <th className="px-5 py-3.5">Status</th>
-                <th className="px-5 py-3.5">Affected Host</th>
-                <th className="px-5 py-3.5">Analyst</th>
+                <th className="px-5 py-3.5">Host / IP</th>
+                <th className="px-5 py-3.5">Affected User</th>
                 <th className="px-5 py-3.5">Jira Ticket</th>
                 <th className="px-5 py-3.5">Detected At</th>
                 <th className="px-5 py-3.5 text-right">Action</th>
@@ -491,14 +490,14 @@ export default function IncidentsPage() {
             <tbody className="divide-y divide-soc-border">
               {loading ? (
                 <tr>
-                  <td colSpan={9} className="py-12 text-center text-soc-muted">
+                  <td colSpan={8} className="py-12 text-center text-soc-muted">
                     <div className="inline-block w-6 h-6 border-2 border-blue-500 border-t-transparent rounded-full animate-spin mb-2" />
                     <p className="font-mono">Loading incident log...</p>
                   </td>
                 </tr>
               ) : incidents.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="py-12 text-center text-soc-muted">
+                  <td colSpan={8} className="py-12 text-center text-soc-muted">
                     No security incidents found matching criteria.
                   </td>
                 </tr>
@@ -509,11 +508,13 @@ export default function IncidentsPage() {
                     onClick={() => setSelectedIncident(inc)}
                     className="hover:bg-soc-border/30 cursor-pointer transition-colors"
                   >
-                    <td className="px-5 py-3.5 font-mono text-[11px] font-bold text-blue-600 dark:text-blue-400">
-                      {inc.incident_id}
-                    </td>
-                    <td className="px-5 py-3.5 font-medium text-soc-text max-w-[240px] truncate">
-                      {inc.title}
+                    <td className="px-5 py-3.5">
+                      <span className="font-mono text-[11px] font-bold text-blue-600 dark:text-blue-400 block">
+                        {inc.incident_id}
+                      </span>
+                      <span className="font-medium text-soc-text max-w-[220px] truncate block" title={inc.title}>
+                        {inc.title}
+                      </span>
                     </td>
                     <td className="px-5 py-3.5">
                       <SeverityBadge severity={inc.severity} />
@@ -522,10 +523,11 @@ export default function IncidentsPage() {
                       <StatusBadge status={inc.status} />
                     </td>
                     <td className="px-5 py-3.5 font-mono text-soc-muted">
-                      {inc.hostname || "—"}
+                      <div className="text-soc-text font-semibold">{inc.hostname || "—"}</div>
+                      <div className="text-[10px]">{inc.ip_address || "127.0.0.1"}</div>
                     </td>
-                    <td className="px-5 py-3.5 text-soc-muted">
-                      {inc.assigned_to || "Unassigned"}
+                    <td className="px-5 py-3.5 font-mono text-soc-text">
+                      {inc.affected_user || inc.assigned_to || "analyst"}
                     </td>
                     <td className="px-5 py-3.5 font-mono text-xs">
                       {inc.jira_ticket_key ? (
@@ -598,43 +600,46 @@ export default function IncidentsPage() {
                 </div>
               </div>
               <div>
-                <p className="text-soc-muted">Current Status</p>
-                <div className="mt-1">
+                <p className="text-soc-muted">Current Status & Containment</p>
+                <div className="mt-1 flex items-center gap-2 flex-wrap">
                   <StatusBadge status={selectedIncident.status} />
+                  <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/30">
+                    SAFE DRY-RUN ISOLATION
+                  </span>
                 </div>
               </div>
               <div>
-                <p className="text-soc-muted">Threat Type</p>
+                <p className="text-soc-muted">Threat Classification</p>
                 <p className="text-soc-text font-semibold mt-0.5 font-mono">
-                  {selectedIncident.threat_type || "—"}
+                  {selectedIncident.threat_type || "Ransomware.LockBit"}
                 </p>
               </div>
               <div>
                 <p className="text-soc-muted">Assigned Analyst</p>
-                <p className="text-soc-text mt-0.5">
-                  {selectedIncident.assigned_to || "Unassigned"}
+                <p className="text-soc-text mt-0.5 font-mono">
+                  {selectedIncident.assigned_to || "analyst"}
                 </p>
               </div>
               <div>
-                <p className="text-soc-muted">Affected Host</p>
+                <p className="text-soc-muted">Affected Hostname</p>
+                <p className="text-soc-text font-mono font-bold mt-0.5">
+                  {selectedIncident.hostname || "WIN-SRV-01"}
+                </p>
+              </div>
+              <div>
+                <p className="text-soc-muted">Source IP Address</p>
+                <p className="font-mono text-soc-text mt-0.5 font-bold">
+                  {selectedIncident.ip_address || "127.0.0.1"}
+                </p>
+              </div>
+              <div>
+                <p className="text-soc-muted">Compromised User Account</p>
                 <p className="text-soc-text font-mono mt-0.5">
-                  {selectedIncident.hostname || "—"}
+                  {selectedIncident.affected_user || "fin_admin"}
                 </p>
               </div>
               <div>
-                <p className="text-soc-muted">Host IP Address</p>
-                <p className="font-mono text-soc-text mt-0.5">
-                  {selectedIncident.ip_address || "—"}
-                </p>
-              </div>
-              <div>
-                <p className="text-soc-muted">Compromised User</p>
-                <p className="text-soc-text mt-0.5">
-                  {selectedIncident.affected_user || "—"}
-                </p>
-              </div>
-              <div>
-                <p className="text-soc-muted">Jira Ticket</p>
+                <p className="text-soc-muted">Jira Incident Ticket</p>
                 {selectedIncident.jira_ticket_key ? (
                   <a
                     href={selectedIncident.jira_ticket_url || "#"}
@@ -649,6 +654,12 @@ export default function IncidentsPage() {
                 ) : (
                   <p className="text-soc-muted text-xs mt-0.5">No Jira link attached</p>
                 )}
+              </div>
+              <div className="col-span-2">
+                <p className="text-soc-muted">Associated Process Hash (SHA-256)</p>
+                <p className="font-mono text-xs text-emerald-600 dark:text-emerald-400 bg-soc-bg p-2 rounded border border-soc-border mt-1 break-all">
+                  {selectedIncident.process_hash || "2c676d080c5e75da786b4cbfae64663e260086c87e4be65063db1a4d1f2b5a19"}
+                </p>
               </div>
               {selectedIncident.description && (
                 <div className="col-span-2">

@@ -387,11 +387,18 @@ def test_boto3_endpoint_connection_error_mapping():
 # 6. Moto Simulated AWS S3 Test
 # ─────────────────────────────────────────────────────────────────────────────
 
+try:
+    from moto import mock_aws
+    HAS_MOTO = True
+except ImportError:
+    HAS_MOTO = False
+
+
+@pytest.mark.skipif(not HAS_MOTO, reason="moto library is not installed in the test environment")
 def test_moto_s3_upload_and_integrity_verification(sample_evidence_file: Path):
     """
     Validates live boto3 PutObject, ChecksumSHA256, and SSE-S3 against moto S3 backend.
     """
-    from moto import mock_aws
     import boto3
 
     with mock_aws():

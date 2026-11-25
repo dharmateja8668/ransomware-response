@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional, Set, Union
 from backend.config import SlackConfig, load_slack_config, mask_secret
 from backend.jira_integration import IncidentData
 from backend.slack_integration import SlackClient, sanitize_error_message
+from backend.teams_integration import TeamsClient, load_teams_config
 
 # Setup logger
 logger = logging.getLogger("orchestrator.notifications")
@@ -72,6 +73,7 @@ class IncidentNotificationService:
         self,
         slack_client: Optional[SlackClient] = None,
         config: Optional[SlackConfig] = None,
+        teams_client: Optional[TeamsClient] = None,
     ):
         """
         Initialize the notification service.
@@ -79,8 +81,10 @@ class IncidentNotificationService:
         Args:
             slack_client: Optional pre-configured SlackClient instance.
             config: Optional pre-loaded SlackConfig instance.
+            teams_client: Optional pre-configured TeamsClient instance.
         """
         self.slack_client = slack_client or SlackClient(config=config)
+        self.teams_client = teams_client or TeamsClient()
         self._sent_notifications: Set[str] = set()
 
     def format_severity(self, severity: str) -> str:
@@ -375,9 +379,27 @@ class IncidentNotificationService:
             assignment_data=assignment_data,
         )
 
-        # 6. Dispatch Notification to Slack
+        # 6. Dispatch Notification to Slack & Teams
         logger.info("Dispatching incident notification to Slack for ticket [%s]...", ticket_key)
         slack_result = self.send_incident_notification(payload, channel=channel)
+
+        # Dispatch to Microsoft Teams alongside Slack (Fault-isolated)
+        teams_result = {"status": "NOT_CONFIGURED", "success": False, "delivered": False}
+        if self.teams_client:
+            try:
+                teams_card = self.teams_client.build_incident_card(
+                    incident_data=inc,
+                    ticket_data=ticket_data,
+                    assignment_data=assignment_data,
+                )
+                teams_result = self.teams_client.send_message(teams_card)
+                if teams_result.get("success"):
+                    logger.info("Microsoft Teams incident notification delivered successfully for ticket [%s].", ticket_key)
+                else:
+                    logger.info("Microsoft Teams notification outcome for ticket [%s]: %s", ticket_key, teams_result.get("status"))
+            except Exception as teams_err:
+                logger.error("Microsoft Teams dispatch exception for ticket [%s]: %s", ticket_key, teams_err)
+                teams_result = {"status": "ERROR", "success": False, "error": str(teams_err), "delivered": False}
 
         # 7. Record Delivery Status (Scenario 3: Slack failure handled gracefully)
         if slack_result.get("success"):
@@ -391,6 +413,7 @@ class IncidentNotificationService:
                 "ticket_key": ticket_key,
                 "incident_id": incident_id,
                 "slack_response": slack_result.get("response"),
+                "teams_response": teams_result,
             }
 
         # Slack failure
@@ -406,5 +429,6 @@ class IncidentNotificationService:
             "ticket_key": ticket_key,
             "incident_id": incident_id,
             "slack_response": slack_result.get("response"),
+            "teams_response": teams_result,
         }
 

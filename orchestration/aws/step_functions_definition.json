@@ -1,0 +1,154 @@
+{
+  "Comment": "ZAALIMA Automated Ransomware Containment & Incident Response Orchestrator State Machine",
+  "StartAt": "IngestAndValidateAlert",
+  "TimeoutSeconds": 600,
+  "States": {
+    "IngestAndValidateAlert": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "OutputPath": "$.Payload",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:us-east-1:123456789012:function:zaalima-ingest-alert",
+        "Payload.$": "$"
+      },
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "WorkflowFailed",
+          "ResultPath": "$.error"
+        }
+      ],
+      "Next": "EvaluateSeverityForContainment"
+    },
+    "EvaluateSeverityForContainment": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Or": [
+            {
+              "Variable": "$.severity",
+              "NumericGreaterThanEquals": 4
+            },
+            {
+              "Variable": "$.threat_type",
+              "StringEquals": "ransomware"
+            }
+          ],
+          "Next": "ExecuteNetworkContainment"
+        }
+      ],
+      "Default": "CollectForensicEvidence"
+    },
+    "ExecuteNetworkContainment": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "OutputPath": "$.Payload",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:us-east-1:123456789012:function:zaalima-containment",
+        "Payload.$": "$"
+      },
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "CollectForensicEvidence",
+          "ResultPath": "$.containment_error"
+        }
+      ],
+      "Next": "CollectForensicEvidence"
+    },
+    "CollectForensicEvidence": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "OutputPath": "$.Payload",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:us-east-1:123456789012:function:zaalima-forensics",
+        "Payload.$": "$"
+      },
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "CreateJiraIncidentTicket",
+          "ResultPath": "$.forensics_error"
+        }
+      ],
+      "Next": "UploadEvidenceToS3"
+    },
+    "UploadEvidenceToS3": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "OutputPath": "$.Payload",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:us-east-1:123456789012:function:zaalima-s3-upload",
+        "Payload.$": "$"
+      },
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "CreateJiraIncidentTicket",
+          "ResultPath": "$.s3_error"
+        }
+      ],
+      "Next": "CreateJiraIncidentTicket"
+    },
+    "CreateJiraIncidentTicket": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "OutputPath": "$.Payload",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:us-east-1:123456789012:function:zaalima-jira-ticket",
+        "Payload.$": "$"
+      },
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "SendSlackAndTeamsAlert",
+          "ResultPath": "$.jira_error"
+        }
+      ],
+      "Next": "SendSlackAndTeamsAlert"
+    },
+    "SendSlackAndTeamsAlert": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "OutputPath": "$.Payload",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:us-east-1:123456789012:function:zaalima-notifications",
+        "Payload.$": "$"
+      },
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "Next": "RecordAuditLedger",
+          "ResultPath": "$.notification_error"
+        }
+      ],
+      "Next": "RecordAuditLedger"
+    },
+    "RecordAuditLedger": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "OutputPath": "$.Payload",
+      "Parameters": {
+        "FunctionName": "arn:aws:lambda:us-east-1:123456789012:function:zaalima-audit-ledger",
+        "Payload.$": "$"
+      },
+      "Next": "WorkflowComplete"
+    },
+    "WorkflowComplete": {
+      "Type": "Succeed"
+    },
+    "WorkflowFailed": {
+      "Type": "Fail",
+      "Cause": "Unhandled error during incident response workflow execution",
+      "Error": "IncidentOrchestrationFailed"
+    }
+  }
+}
